@@ -1,22 +1,19 @@
 -- ════════════════════════════════════════════════════════════
---  SIMPLYSPIRITED v2.0 — LOAD.LUA
+--  SIMPLYSPIRITED v2.4 — LOAD.LUA
 --  Draw-based universal intelligence suite
 --  For SHADOWMILESC (computerizedcarrier2)
 --  ────────────────────────────────────────────────────────────
---  Chain loader: core → hookmeta → closure → draw → watch →
---                decomp → export
---  Each part boots independently; failures are named, not fatal
---  Clean-state wipe on every boot — no double hooks ever
---  v2.1: adds META NET (namecall coverage) + CLOSURE (function
---        autopsies)
+--  Chain loader: ENGINE → META NET → CLOSURE → DRAW UI →
+--  SURVEILLANCE → UI PLUS → GOVERNOR → STEALTH → ARG FIDELITY →
+--  OUTPUT → DECOMPILER → VAULT → VAULT 2
+--  13 parts. Required halt cleanly. Optional degrade gracefully.
 -- ════════════════════════════════════════════════════════════
 
 print("╔══════════════════════════════════════════╗")
-print("║  SIMPLYSPIRITED v2.3 — DRAW EDITION      ║")
+print("║  SIMPLYSPIRITED v2.4 — DRAW EDITION      ║")
 print("║  operator: SHADOWMILESC                  ║")
 print("╚══════════════════════════════════════════╝")
 
--- ═══ CONFIG: point this at your repo ═══
 local REPO = "https://raw.githubusercontent.com/randomguy454/simplyspirited/refs/heads/main/"
 
 local PARTS = {
@@ -27,6 +24,7 @@ local PARTS = {
     { file = "watch.lua",        name = "SURVEILLANCE", required = false },
     { file = "uiplus.lua",       name = "UI PLUS",      required = false },
     { file = "governor.lua",     name = "GOVERNOR",     required = false },
+    { file = "output.lua",       name = "OUTPUT",       required = false },
     { file = "stealth.lua",      name = "STEALTH",      required = false },
     { file = "describe_ext.lua", name = "ARG FIDELITY", required = false },
     { file = "decomp.lua",       name = "DECOMPILER",   required = false },
@@ -34,18 +32,16 @@ local PARTS = {
     { file = "vault2.lua",       name = "VAULT 2",      required = false },
 }
 
--- ═══ CLEAN STATE Wipe — kills any previous session ═══
 getgenv().SS2 = nil
 getgenv().SS2_READY = nil
 getgenv().SS2_UI = nil
 
--- ═══ LOAD SEQUENCE ═══
 local loaded, failed = 0, {}
 local results = {}
 
 for i, part in ipairs(PARTS) do
     local url = REPO .. part.file .. "?nocache=" .. os.time() .. i
-    local src, fetchErr
+    local src
 
     local okFetch = pcall(function()
         src = game:HttpGet(url)
@@ -87,10 +83,9 @@ for i, part in ipairs(PARTS) do
             end
         end
     end
-    task.wait(0.1) -- let each part finish its own boot
+    task.wait(0.1)
 end
 
--- ═══ BOOT REPORT ═══
 print("══════════ BOOT REPORT ══════════")
 for _, r in ipairs(results) do
     print(("  %-14s %s"):format(r.name, r.ok and "✓ ONLINE" or "✗ " .. (r.why or "failed")))
@@ -101,17 +96,16 @@ if #failed == 0 then
     print("[load] ALL SYSTEMS ONLINE — " .. loaded .. "/" .. #PARTS)
 elseif loaded > 0 then
     warn("[load] PARTIAL BOOT: " .. loaded .. "/" .. #PARTS .. " | failed: " .. table.concat(failed, "; "))
-    warn("[load] suite is usable in degraded mode — check failures above")
+    warn("[load] suite usable in degraded mode")
 else
     warn("[load] TOTAL BOOT FAILURE")
 end
 
--- ═══ SESSION FINGERPRINT ═══
 local SS2 = getgenv().SS2
 if SS2 then
     SS2.sessionStart = os.date()
     SS2.operator = "SHADOWMILESC"
     SS2.displayName = "computerizedcarrier2"
-    SS2.version = "2.1"
+    SS2.version = "2.4"
 end
 getgenv().SIMPLYSPIRITED_V2 = loaded
