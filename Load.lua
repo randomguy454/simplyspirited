@@ -20,13 +20,18 @@ print("╚═══════════════════════�
 local REPO = "https://raw.githubusercontent.com/randomguy454/simplyspirited/refs/heads/main/"
 
 local PARTS = {
-    { file = "core.lua",     name = "ENGINE",       required = true  },
-    { file = "hookmeta.lua", name = "META NET",     required = false },
-    { file = "closure.lua",  name = "CLOSURE",      required = false },
-    { file = "draw.lua",     name = "DRAW UI",      required = true  },
-    { file = "watch.lua",    name = "SURVEILLANCE", required = false },
-    { file = "decomp.lua",   name = "DECOMPILER",   required = false },
-    { file = "export.lua",   name = "VAULT",        required = false },
+    { file = "core.lua",         name = "ENGINE",       required = true  },
+    { file = "hookmeta.lua",     name = "META NET",     required = false },
+    { file = "closure.lua",      name = "CLOSURE",      required = false },
+    { file = "draw.lua",         name = "DRAW UI",      required = true  },
+    { file = "watch.lua",        name = "SURVEILLANCE", required = false },
+    { file = "uiplus.lua",       name = "UI PLUS",      required = false },
+    { file = "governor.lua",     name = "GOVERNOR",     required = false },
+    { file = "stealth.lua",      name = "STEALTH",      required = false },
+    { file = "describe_ext.lua", name = "ARG FIDELITY", required = false },
+    { file = "decomp.lua",       name = "DECOMPILER",   required = false },
+    { file = "export.lua",       name = "VAULT",        required = false },
+    { file = "vault2.lua",       name = "VAULT 2",      required = false },
 }
 
 -- ═══ CLEAN STATE Wipe — kills any previous session ═══
