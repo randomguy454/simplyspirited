@@ -1,10 +1,12 @@
 -- ════════════════════════════════════════════════════════════
---  SIMPLYSPIRITED v2.0 — SURVEILLANCE TIER
+--  SIMPLYSPIRITED v2.0 — SURVEILLANCE TIER (v2.1 updated)
 --  For SHADOWMILESC (computerizedcarrier2)
---  • Enhanced live feed with pause + copy-ready output
---  • Remote profiles: click-free console deep-dive per remote
---  • Arg presets: save/replay named call libraries
---  • Auto-doc: remote API documentation generator v2
+--  ────────────────────────────────────────────────────────────
+--  • Surveillance feed window (Draw, draggable, pausable)
+--  • Remote deep-dives: full arg signature history per remote
+--  • Arg presets: save/replay named call library
+--  • API documentation generator v2
+--  • v2.1: feed search
 -- ════════════════════════════════════════════════════════════
 
 print("[SS2-watch] loading surveillance tier...")
@@ -22,7 +24,6 @@ SS2.togglePause = function()
 end
 
 -- ═══════════ REMOTE DEEP-DIVE ═══════════
--- full profile of one remote: every arg signature it's ever used
 function SS2.profileRemote(nameOrPath)
     local matches = {}
     for r, prof in pairs(SS2.remotes) do
@@ -41,8 +42,10 @@ function SS2.profileRemote(nameOrPath)
         print("  class: " .. m.r.ClassName)
         print("  path:  " .. (prof.path or "?"))
         print("  calls: " .. prof.calls .. " (out " .. prof.out .. " / in " .. prof.inn .. ")")
+        if prof.metaCaught and prof.metaCaught > 0 then
+            print("  meta-net caught: " .. prof.metaCaught)
+        end
         print("  first: " .. prof.firstSeen .. " | last: " .. prof.lastSeen)
-        -- rank signatures
         local sigs = {}
         for sig, cnt in pairs(prof.sigs) do
             sigs[#sigs + 1] = { s = sig, c = cnt }
@@ -86,7 +89,6 @@ function SS2.playPreset(name, count, delay)
     delay = delay or 0.15
     local p = SS2.presets[name]
     if not p then print("[watch] no preset '" .. tostring(name) .. "'") return end
-    -- find the live remote by path
     local live = nil
     for r, prof in pairs(SS2.remotes) do
         if prof.path == p.path then live = r break end
@@ -116,18 +118,17 @@ function SS2.listPresets()
     if n == 0 then print("  (empty)") end
 end
 
--- ═══════════ AUTO-DOC v2 ═══════════
+-- ═══════════ API DOC v2 ═══════════
 function SS2.generateAPIDoc()
     local out = {}
     out[#out + 1] = "╔══════════════════════════════════════╗"
-    out[#out + 1] = "  SIMPLYSPIRITED v2.0 — API DOCUMENT"
+    out[#out + 1] = "  SIMPLYSPIRITED v2.1 — API DOCUMENT"
     out[#out + 1] = "  game: " .. SS2.game .. " | place: " .. SS2.placeId
     out[#out + 1] = "  generated: " .. os.date()
     out[#out + 1] = "  operator: SHADOWMILESC (computerizedcarrier2)"
     out[#out + 1] = "╚══════════════════════════════════════╝"
     out[#out + 1] = ""
 
-    -- rank remotes by activity
     local ranked = {}
     for r, prof in pairs(SS2.remotes) do
         ranked[#ranked + 1] = { r = r, prof = prof }
@@ -136,6 +137,7 @@ function SS2.generateAPIDoc()
 
     out[#out + 1] = "TOTAL REMOTES: " .. #ranked
     out[#out + 1] = "TOTAL CALLS CAPTURED: " .. #SS2.log
+    out[#out + 1] = "META NET: " .. tostring(SS2.metaHooked)
     out[#out + 1] = ""
 
     for _, e in ipairs(ranked) do
@@ -145,6 +147,9 @@ function SS2.generateAPIDoc()
         out[#out + 1] = ("PATH:   %s"):format(prof.path)
         out[#out + 1] = ("CALLS:  %d (out %d / in %d) | seen %s -> %s"):format(
             prof.calls, prof.out, prof.inn, prof.firstSeen, prof.lastSeen)
+        if prof.metaCaught and prof.metaCaught > 0 then
+            out[#out + 1] = ("  (meta-net caught %d of these)"):format(prof.metaCaught)
+        end
         local sigs = {}
         for sig, cnt in pairs(prof.sigs) do
             sigs[#sigs + 1] = { s = sig, c = cnt }
@@ -163,12 +168,33 @@ function SS2.generateAPIDoc()
         makefolder("SimplySpirited")
         writefile("SimplySpirited/api_doc_v2.txt", text)
     end)
-    print("[watch] API doc saved: " .. #ranked .. " remotes, " .. #text .. " chars -> SimplySpirited/api_doc_v2.txt")
+    print("[watch] API doc saved: " .. #ranked .. " remotes -> SimplySpirited/api_doc_v2.txt")
     return text
 end
 SS2.apiDoc = SS2.generateAPIDoc
 
--- ═══════════ LIVE FEED WINDOW (second Draw window) ═══════════
+-- ═══════════ v2.1: FEED SEARCH ═══════════
+function SS2.searchFeed(term)
+    print('═══ FEED SEARCH: "' .. tostring(term) .. '" ═══')
+    local n = 0
+    for _, rec in ipairs(SS2.log) do
+        local hay = rec.name .. " " .. table.concat(rec.args, " ")
+        if hay:lower():find(tostring(term):lower(), 1, true) then
+            n = n + 1
+            print(("#%d [%s] %s :: %s"):format(rec.id, rec.dir, rec.name, table.concat(rec.args, " | ")))
+            if n > 30 then
+                print("... (30+ shown — refine term)")
+                break
+            end
+        end
+    end
+    if n == 0 then
+        print("  (no matches)")
+    end
+    return n
+end
+
+-- ═══════════ LIVE FEED WINDOW (Draw) ═══════════
 local THEME = SS2.theme
 local UIS = game:GetService("UserInputService")
 
@@ -185,12 +211,12 @@ local function newD(class, props)
     if ok and obj then drawObjects[#drawObjects + 1] = obj return obj end
 end
 
--- chrome
 local bg = newD("Square", { Size = Vector2.new(fw.w, fw.h), Position = Vector2.new(fw.x, fw.y), Color = Color3.fromRGB(12, 12, 16), Filled = true, Visible = true })
 local hdr = newD("Square", { Size = Vector2.new(fw.w, fw.headerH), Position = Vector2.new(fw.x, fw.y), Color = THEME.PANEL, Filled = true, Visible = true })
 local border = newD("Square", { Size = Vector2.new(fw.w, fw.h), Position = Vector2.new(fw.x, fw.y), Color = THEME.GREEN, Filled = false, Transparency = 0.6, Visible = true })
 local title = newD("Text", { Text = "SURVEILLANCE FEED — " .. SS2.game:sub(1, 24), Size = 13, Position = Vector2.new(fw.x + 8, fw.y + 6), Color = THEME.GREEN, Visible = true, Outline = true })
 local closeT = newD("Text", { Text = "X", Size = 13, Position = Vector2.new(fw.x + fw.w - 18, fw.y + 5), Color = THEME.RED, Visible = true, Outline = true })
+local pauseBtn = newD("Text", { Text = "[PAUSE]", Size = 12, Position = Vector2.new(fw.x + fw.w - 90, fw.y + 5), Color = THEME.ACCENT, Visible = true, Outline = true })
 local statT = newD("Text", { Text = "", Size = 12, Position = Vector2.new(fw.x + 8, fw.y + fw.h - 20), Color = THEME.DIM, Visible = true, Outline = true })
 
 local feedTexts = {}
@@ -203,33 +229,29 @@ for i = 1, FEED_ROWS do
     })
 end
 
--- pause button region
-local pauseBtn = newD("Text", { Text = "[PAUSE]", Size = 12, Position = Vector2.new(fw.x + fw.w - 90, fw.y + 5), Color = THEME.ACCENT, Visible = true, Outline = true })
-
--- ═══ FEED REFRESH ═══
 local function refreshFeed()
     local shown = 0
     for i = #SS2.log, 1, -1 do
         local rec = SS2.log[i]
-        if rec.dir == "OUT" or rec.dir == "IN" then
-            shown = shown + 1
-            local idx = FEED_ROWS - shown + 1
-            if idx >= 1 and feedTexts[idx] then
-                local col = rec.dir == "OUT" and THEME.GREEN or THEME.TEXT
-                feedTexts[idx].Text = ("#%d %s %s | %s"):format(
-                    rec.id, rec.dir, rec.name:sub(1, 18),
-                    (rec.args[1] and tostring(rec.args[1]):sub(1, 40)) or "")
-                feedTexts[idx].Color = col
-            end
-            if shown >= FEED_ROWS then break end
+        shown = shown + 1
+        local idx = FEED_ROWS - shown + 1
+        if idx >= 1 and feedTexts[idx] then
+            local col = rec.dir == "OUT" and THEME.GREEN or THEME.TEXT
+            feedTexts[idx].Text = ("#%d %s %s | %s"):format(
+                rec.id, rec.dir, rec.name:sub(1, 18),
+                (rec.args[1] and tostring(rec.args[1]):sub(1, 40)) or "")
+            feedTexts[idx].Color = col
         end
+        if shown >= FEED_ROWS then break end
     end
     for i = 1, FEED_ROWS - shown do
         if feedTexts[i] then feedTexts[i].Text = "" end
     end
     local rc = 0
     for _ in pairs(SS2.remotes) do rc = rc + 1 end
-    statT.Text = ("remotes: %d | captured: %d | %s"):format(rc, #SS2.log, SS2.paused and "PAUSED" or "LIVE")
+    statT.Text = ("remotes: %d | captured: %d | %s%s"):format(
+        rc, #SS2.log, SS2.paused and "PAUSED" or "LIVE",
+        SS2.metaHooked and " | NET" or "")
 end
 
 -- ═══ DRAG + BUTTONS ═══
@@ -287,13 +309,12 @@ task.spawn(function()
     end
 end)
 
-
-
-print("[SS2-watch] surveillance tier LIVE")
+print("[SS2-watch] surveillance tier LIVE (v2.1)")
 print("[watch] console commands:")
 print("  SS2.profileRemote('name')  — deep-dive any remote")
 print("  SS2.savePreset('name')     — save last call as preset")
 print("  SS2.playPreset('name', n)  — replay a preset n times")
 print("  SS2.listPresets()          — your call library")
-print("  SS2.generateAPIDoc()       — full API documentation -> file")
+print("  SS2.generateAPIDoc()       — API documentation -> file")
 print("  SS2.togglePause()          — pause/resume capture")
+print("  SS2.searchFeed('term')     — search all captured calls (v2.1)")
