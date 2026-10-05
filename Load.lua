@@ -1,19 +1,20 @@
 -- ════════════════════════════════════════════════════════════
---  SIMPLYSPIRITED v2.4 — LOAD.LUA
---  Draw-based universal intelligence suite
+--  SIMPLYSPIRITED v2.6 — LOAD.LUA
+--  SCREENGUI EDITION (universal intelligence suite)
 --  For SHADOWMILESC (computerizedcarrier2)
 --  ────────────────────────────────────────────────────────────
---  Chain loader: ENGINE → META NET → CLOSURE → DRAW UI →
---  SURVEILLANCE → UI PLUS → GOVERNOR → STEALTH → ARG FIDELITY →
---  OUTPUT → DECOMPILER → VAULT → VAULT 2
---  13 parts. Required halt cleanly. Optional degrade gracefully.
+--  Chain loader: ENGINE → META NET → CLOSURE → CALLERS →
+--  SCREEN UI → SG PLUS → SURVEILLANCE → UI PLUS → GOVERNOR →
+--  OUTPUT → STEALTH → ARG FIDELITY → DECOMPILER → VAULT → VAULT 2
+--  v2.6: Drawing UI replaced with ScreenGui (Delta-compatible).
 -- ════════════════════════════════════════════════════════════
 
 print("╔══════════════════════════════════════════╗")
-print("║  SIMPLYSPIRITED v2.4 — DRAW EDITION      ║")
+print("║  SIMPLYSPIRITED v2.6 — SCREENGUI EDITION ║")
 print("║  operator: SHADOWMILESC                  ║")
 print("╚══════════════════════════════════════════╝")
 
+-- ═══ CONFIG ═══
 local REPO = "https://raw.githubusercontent.com/randomguy454/simplyspirited/refs/heads/main/"
 
 local PARTS = {
@@ -21,9 +22,9 @@ local PARTS = {
     { file = "hookmeta.lua",     name = "META NET",     required = false },
     { file = "closure.lua",      name = "CLOSURE",      required = false },
     { file = "callers.lua",      name = "CALLERS",      required = false },
-    { file = "draw.lua",         name = "DRAW UI",      required = true  },
+    { file = "screengui.lua",    name = "SCREEN UI",    required = true  },
+    { file = "sg_plus.lua",      name = "SG PLUS",      required = false },
     { file = "watch.lua",        name = "SURVEILLANCE", required = false },
-    { file = "uiplus.lua",       name = "UI PLUS",      required = false },
     { file = "governor.lua",     name = "GOVERNOR",     required = false },
     { file = "output.lua",       name = "OUTPUT",       required = false },
     { file = "stealth.lua",      name = "STEALTH",      required = false },
@@ -33,10 +34,12 @@ local PARTS = {
     { file = "vault2.lua",       name = "VAULT 2",      required = false },
 }
 
+-- ═══ CLEAN STATE WIPE ═══
 getgenv().SS2 = nil
 getgenv().SS2_READY = nil
 getgenv().SS2_UI = nil
 
+-- ═══ LOAD SEQUENCE ═══
 local loaded, failed = 0, {}
 local results = {}
 
@@ -87,6 +90,7 @@ for i, part in ipairs(PARTS) do
     task.wait(0.1)
 end
 
+-- ═══ BOOT REPORT ═══
 print("══════════ BOOT REPORT ══════════")
 for _, r in ipairs(results) do
     print(("  %-14s %s"):format(r.name, r.ok and "✓ ONLINE" or "✗ " .. (r.why or "failed")))
@@ -102,11 +106,12 @@ else
     warn("[load] TOTAL BOOT FAILURE")
 end
 
+-- ═══ SESSION FINGERPRINT ═══
 local SS2 = getgenv().SS2
 if SS2 then
     SS2.sessionStart = os.date()
     SS2.operator = "SHADOWMILESC"
     SS2.displayName = "computerizedcarrier2"
-    SS2.version = "2.4"
+    SS2.version = "2.6"
 end
 getgenv().SIMPLYSPIRITED_V2 = loaded
