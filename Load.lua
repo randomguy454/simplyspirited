@@ -3,13 +3,16 @@
 --  Draw-based universal intelligence suite
 --  For SHADOWMILESC (computerizedcarrier2)
 --  ────────────────────────────────────────────────────────────
---  Chain loader: core → draw → watch → decomp → export
+--  Chain loader: core → hookmeta → closure → draw → watch →
+--                decomp → export
 --  Each part boots independently; failures are named, not fatal
 --  Clean-state wipe on every boot — no double hooks ever
+--  v2.1: adds META NET (namecall coverage) + CLOSURE (function
+--        autopsies)
 -- ════════════════════════════════════════════════════════════
 
 print("╔══════════════════════════════════════════╗")
-print("║  SIMPLYSPIRITED v2.0 — DRAW EDITION      ║")
+print("║  SIMPLYSPIRITED v2.1 — DRAW EDITION      ║")
 print("║  operator: SHADOWMILESC                  ║")
 print("╚══════════════════════════════════════════╝")
 
@@ -17,11 +20,13 @@ print("╚═══════════════════════�
 local REPO = "https://raw.githubusercontent.com/randomguy454/simplyspirited/refs/heads/main/"
 
 local PARTS = {
-    { file = "core.lua",   name = "ENGINE",    required = true  },
-    { file = "draw.lua",   name = "DRAW UI",   required = true  },
-    { file = "watch.lua",  name = "SURVEILLANCE", required = false },
-    { file = "decomp.lua", name = "DECOMPILER", required = false },
-    { file = "export.lua", name = "VAULT",     required = false },
+    { file = "core.lua",     name = "ENGINE",       required = true  },
+    { file = "hookmeta.lua", name = "META NET",     required = false },
+    { file = "closure.lua",  name = "CLOSURE",      required = false },
+    { file = "draw.lua",     name = "DRAW UI",      required = true  },
+    { file = "watch.lua",    name = "SURVEILLANCE", required = false },
+    { file = "decomp.lua",   name = "DECOMPILER",   required = false },
+    { file = "export.lua",   name = "VAULT",        required = false },
 }
 
 -- ═══ CLEAN STATE Wipe — kills any previous session ═══
@@ -102,6 +107,6 @@ if SS2 then
     SS2.sessionStart = os.date()
     SS2.operator = "SHADOWMILESC"
     SS2.displayName = "computerizedcarrier2"
-    SS2.version = "2.0"
+    SS2.version = "2.1"
 end
 getgenv().SIMPLYSPIRITED_V2 = loaded
