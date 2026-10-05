@@ -14,7 +14,7 @@ print("║  operator: SHADOWMILESC                  ║")
 print("╚══════════════════════════════════════════╝")
 
 -- ═══ CONFIG: point this at your repo ═══
-local REPO = "https://raw.githubusercontent.com/randomguy454/luau-telemetryluau-telemetry/refs/heads/main/"
+local REPO = "https://raw.githubusercontent.com/randomguy454/simplyspirited/refs/heads/main/"
 
 local PARTS = {
     { file = "core.lua",   name = "ENGINE",    required = true  },
