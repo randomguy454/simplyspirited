@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════
---  SIMPLYSPIRITED v2.0 — CORE ENGINE
+--  SIMPLYSPIRITED v2.4 — CORE ENGINE
 --  For SHADOWMILESC (computerizedcarrier2)
 --  ────────────────────────────────────────────────────────────
 --  Universal remote intelligence. Assumes nothing about the game.
@@ -8,6 +8,7 @@
 --  • Remote profiles: per-remote counts + arg signature histories
 --  • Value watcher: any ValueBase, delta-tracked
 --  • Player census • session journal • toggleable noise filters
+--  • v2.4: verbosity system — quiet/smart/loud console output
 --  All state: getgenv().SS2
 -- ════════════════════════════════════════════════════════════
 
@@ -18,16 +19,18 @@ local P = Players.LocalPlayer
 
 -- ═══════════ STATE ═══════════
 getgenv().SS2 = {
-    version = "2.0",
+    version = "2.4",
     game = game.Name,
     placeId = game.PlaceId,
     jobId = game.JobId,
 
-    remotes = {},   -- [remote] = profile {path, class, calls, out, inn, hooked, sigs={sig->count}, firstSeen, lastSeen}
-    log = {},       -- call records {id, remote, name, path, class, dir, t, args(desc), raw}
+    remotes = {},   -- [remote] = profile
+    log = {},       -- call records
     journal = {},   -- significant events
     values = {},    -- [valueObj] = lastValue
     players = {},   -- [player] = snapshot
+
+    verbosity = "smart",  -- "quiet" | "smart" | "loud"
 
     filters = {
         heartbeat = true, stepped = true, renderstepped = true,
@@ -103,7 +106,7 @@ local function describe(v, depth)
 end
 SS2.describe = describe
 
--- ═══════════ CALL RECORDER ═══════════
+-- ═══════════ CALL RECORDER (v2.4: verbosity-gated printing) ═══════════
 local callId = 0
 
 local function recordCall(remote, args, direction)
@@ -145,9 +148,21 @@ local function recordCall(remote, args, direction)
         prof.sigs[sig] = (prof.sigs[sig] or 0) + 1
     end
 
+    -- ═══ v2.4: verbosity-gated console output ═══
     local tag = direction == "OUT" and ">>>" or "<<<"
-    print(("[%s #%d] %s %s\n    %s"):format(
-        tag, rec.id, rec.class, rec.path, table.concat(rec.args, " | ")))
+    local showIt
+    if SS2.verbosity == "loud" then
+        showIt = true
+    elseif SS2.verbosity == "quiet" then
+        showIt = false
+    else
+        -- smart: first contact with a remote, or flagged interesting
+        showIt = (prof and prof.calls <= 2) or (SS2._isInteresting and SS2._isInteresting(rec))
+    end
+    if showIt then
+        print(("[%s #%d] %s %s\n    %s"):format(
+            tag, rec.id, rec.class, rec.path, table.concat(rec.args, " | ")))
+    end
 
     if SS2.onCall then
         pcall(SS2.onCall, rec)
@@ -180,7 +195,6 @@ local function hookRemote(r)
     if prof.hooked then return end
     prof.hooked = true
 
-    -- inbound
     if r:IsA("RemoteEvent") then
         pcall(function()
             r.OnClientEvent:Connect(function(...)
@@ -191,7 +205,6 @@ local function hookRemote(r)
         end)
     end
 
-    -- outbound: FireServer
     pcall(function()
         local oldFire
         oldFire = hookfunction(r.FireServer, function(self, ...)
@@ -202,7 +215,6 @@ local function hookRemote(r)
         end)
     end)
 
-    -- outbound: InvokeServer
     pcall(function()
         local oldInvoke
         oldInvoke = hookfunction(r.InvokeServer, function(self, ...)
@@ -326,6 +338,6 @@ local remoteCount = scanAllRemotes()
 
 journal("BOOT", "suite online in " .. SS2.game)
 print("[SS2-core] discovered + hooked " .. remoteCount .. " remotes")
-print("[SS2-core] value watcher live | census done | journal started")
-print("[SS2-core] engine ready — await draw.lua (UI) + intel tiers")
+print("[SS2-core] verbosity: " .. SS2.verbosity .. " | value watcher | census | journal")
+print("[SS2-core] engine ready")
 getgenv().SS2_READY = true
