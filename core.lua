@@ -1,14 +1,14 @@
 -- ════════════════════════════════════════════════════════════
---  SIMPLYSPIRITED v2.4 — CORE ENGINE
+--  SIMPLYSPIRITED v2.7 — CORE ENGINE
 --  For SHADOWMILESC (computerizedcarrier2)
 --  ────────────────────────────────────────────────────────────
 --  Universal remote intelligence. Assumes nothing about the game.
 --  • Discovery + hooks: every RemoteEvent/Function, in AND out
+--  • v2.7: PERIODIC RESCAN — catches remotes missed at boot race
 --  • Full call storage: RAW args preserved (replayer-grade)
 --  • Remote profiles: per-remote counts + arg signature histories
 --  • Value watcher: any ValueBase, delta-tracked
---  • Player census • session journal • toggleable noise filters
---  • v2.4: verbosity system — quiet/smart/loud console output
+--  • Player census • session journal • verbosity-gated output
 --  All state: getgenv().SS2
 -- ════════════════════════════════════════════════════════════
 
@@ -19,7 +19,7 @@ local P = Players.LocalPlayer
 
 -- ═══════════ STATE ═══════════
 getgenv().SS2 = {
-    version = "2.4",
+    version = "2.7",
     game = game.Name,
     placeId = game.PlaceId,
     jobId = game.JobId,
@@ -106,7 +106,7 @@ local function describe(v, depth)
 end
 SS2.describe = describe
 
--- ═══════════ CALL RECORDER (v2.4: verbosity-gated printing) ═══════════
+-- ═══════════ CALL RECORDER (verbosity-gated) ═══════════
 local callId = 0
 
 local function recordCall(remote, args, direction)
@@ -139,7 +139,6 @@ local function recordCall(remote, args, direction)
     table.insert(SS2.log, rec)
     if #SS2.log > SS2.maxLog then table.remove(SS2.log, 1) end
 
-    -- profile update
     if prof then
         prof.calls = prof.calls + 1
         prof.lastSeen = os.date("%H:%M:%S")
@@ -148,7 +147,7 @@ local function recordCall(remote, args, direction)
         prof.sigs[sig] = (prof.sigs[sig] or 0) + 1
     end
 
-    -- ═══ v2.4: verbosity-gated console output ═══
+    -- verbosity-gated console output
     local tag = direction == "OUT" and ">>>" or "<<<"
     local showIt
     if SS2.verbosity == "loud" then
@@ -156,7 +155,6 @@ local function recordCall(remote, args, direction)
     elseif SS2.verbosity == "quiet" then
         showIt = false
     else
-        -- smart: first contact with a remote, or flagged interesting
         showIt = (prof and prof.calls <= 2) or (SS2._isInteresting and SS2._isInteresting(rec))
     end
     if showIt then
@@ -242,6 +240,22 @@ SS2.scanRemotes = scanAllRemotes
 game.DescendantAdded:Connect(function(d)
     if d:IsA("RemoteEvent") or d:IsA("RemoteFunction") then
         task.defer(pcall, hookRemote, d)
+    end
+end)
+
+-- ═══════════ v2.7: PERIODIC RESCAN ═══════════
+-- Boot-time discovery can race slow-loading games. This sweep
+-- catches any remote that loaded late or was missed, every 15s.
+task.spawn(function()
+    while true do
+        task.wait(15)
+        pcall(function()
+            for _, d in ipairs(game:GetDescendants()) do
+                if (d:IsA("RemoteEvent") or d:IsA("RemoteFunction")) and not SS2.remotes[d] then
+                    pcall(hookRemote, d)
+                end
+            end
+        end)
     end
 end)
 
@@ -338,6 +352,7 @@ local remoteCount = scanAllRemotes()
 
 journal("BOOT", "suite online in " .. SS2.game)
 print("[SS2-core] discovered + hooked " .. remoteCount .. " remotes")
+print("[SS2-core] periodic rescan: every 15s (catches boot-race misses)")
 print("[SS2-core] verbosity: " .. SS2.verbosity .. " | value watcher | census | journal")
 print("[SS2-core] engine ready")
 getgenv().SS2_READY = true
