@@ -20,6 +20,7 @@ local PARTS = {
     { file = "core.lua",         name = "ENGINE",       required = true  },
     { file = "hookmeta.lua",     name = "META NET",     required = false },
     { file = "closure.lua",      name = "CLOSURE",      required = false },
+    { file = "callers.lua",      name = "CALLERS",      required = false },
     { file = "draw.lua",         name = "DRAW UI",      required = true  },
     { file = "watch.lua",        name = "SURVEILLANCE", required = false },
     { file = "uiplus.lua",       name = "UI PLUS",      required = false },
