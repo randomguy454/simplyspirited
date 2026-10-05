@@ -1,16 +1,11 @@
 -- ════════════════════════════════════════════════════════════
---  SIMPLYSPIRITED v2.3 — UI PLUS (SOLE FEED OWNER)
+--  SIMPLYSPIRITED v2.4 — UI PLUS (SOLE FEED OWNER)
 --  For SHADOWMILESC (computerizedcarrier2)
 --  ────────────────────────────────────────────────────────────
 --  TAKES OWNERSHIP of the feed window:
---   • destroys watch.lua's feed draw objects (engine functions
---     in watch.lua remain fully functional)
---   • rebuilds: scrollable feed (wheel + scrollbar + LIVE-pin),
---     click-to-expand detail panel, clipboard actions
---   • keyboard while panel open: R=replay C=copy P=preset I=inspect
---  watch.lua: add "if SS2.uiplusOwner then return end" to the top
---  of its render loop (see loader notes) OR let this file handle
---  the handoff automatically below.
+--   • scroll (wheel + LIVE-pin), click-to-expand detail panel,
+--     clipboard + keyboard actions (R/C/P/I/X)
+--  watch.lua feed loop yields via SS2.uiplusOwner flag.
 -- ════════════════════════════════════════════════════════════
 
 print("[SS2-uiplus] taking feed ownership...")
@@ -23,17 +18,10 @@ local UIS = game:GetService("UserInputService")
 local THEME = SS2.theme
 local fw = SS2.feedWin
 
--- ═══ SIGNAL WATCH.LUI HANDOFF ═══
 SS2.uiplusOwner = true
 
--- ═══ DESTROY WATCH'S FEED OBJECTS ═══
--- watch.lua stored its objects in a local table we can't reach,
--- so we track and remove ALL current Drawing objects in the feed
--- region by re-creating clean. Simplest safe approach: watch.lua's
--- objects are its own GC — we set its loop's exit flag instead.
-fw.open = false -- watch.lua's render loop exits on this
+fw.open = false
 
--- ═══ OUR STATE ═══
 local UP = {
     scrollOffset = 0,
     pinned = true,
@@ -46,7 +34,6 @@ local FEED_ROWS = 13
 local ROW_H = 17
 local PANEL_H = 110
 
--- ═══ DRAW REGISTRY ═══
 local objs = {}
 local function newD(class, props)
     local ok, obj = pcall(function()
@@ -66,27 +53,14 @@ local function unloadAll()
     print("[SS2-uiplus] window destroyed — engine functions still live")
 end
 
--- ═══ WINDOW SHELL ═══
 local W = {
     x = fw.x, y = fw.y,
-    w = fw.w, h = fw.h + PANEL_H, -- room for the expandable panel
+    w = fw.w, h = fw.h + PANEL_H,
     headerH = 26,
     dragging = false,
     off = { x = 0, y = 0 },
 }
 
-local function refreshPositions()
-    local dx = W.x - fw.x
-    local dy = W.y - fw.y
-    for _, d in ipairs(objs) do
-        pcall(function()
-            d.Position = d.Position + Vector2.new(dx, dy)
-        end)
-    end
-    fw.x, fw.y = W.x, W.y
-end
-
--- chrome
 newD("Square", { Size = Vector2.new(W.w, W.h), Position = Vector2.new(W.x, W.y), Color = Color3.fromRGB(12, 12, 16), Filled = true, Visible = true })
 newD("Square", { Size = Vector2.new(W.w, W.headerH), Position = Vector2.new(W.x, W.y), Color = THEME.PANEL, Filled = true, Visible = true })
 newD("Square", { Size = Vector2.new(W.w, W.h), Position = Vector2.new(W.x, W.y), Color = THEME.GREEN, Filled = false, Transparency = 0.6, Visible = true })
@@ -94,17 +68,12 @@ newD("Text", { Text = "SURVEILLANCE+ — " .. SS2.game:sub(1, 22), Size = 13, Po
 newD("Text", { Text = "X", Size = 13, Position = Vector2.new(W.x + W.w - 18, W.y + 5), Color = THEME.RED, Visible = true, Outline = true })
 newD("Text", { Text = "[PAUSE]", Size = 12, Position = Vector2.new(W.x + W.w - 90, W.y + 5), Color = THEME.ACCENT, Visible = true, Outline = true })
 
--- scrollbar strip
 newD("Square", { Size = Vector2.new(6, W.h - W.headerH - 26), Position = Vector2.new(W.x + W.w - 9, W.y + W.headerH + 4), Color = Color3.fromRGB(40, 40, 50), Filled = true, Visible = true })
 local sbThumb = newD("Square", { Size = Vector2.new(6, 40), Position = Vector2.new(W.x + W.w - 9, W.y + W.headerH + 4), Color = THEME.ACCENT, Filled = true, Visible = true })
 
--- live indicator
 local liveDot = newD("Text", { Text = "● LIVE", Size = 11, Position = Vector2.new(W.x + W.w - 150, W.y + W.h - 18), Color = THEME.GREEN, Visible = true, Outline = true })
-
--- stat line
 local statT = newD("Text", { Text = "", Size = 12, Position = Vector2.new(W.x + 8, W.y + W.h - 18), Color = THEME.DIM, Visible = true, Outline = true })
 
--- feed rows
 local feedTexts = {}
 for i = 1, FEED_ROWS do
     feedTexts[i] = newD("Text", {
@@ -114,7 +83,6 @@ for i = 1, FEED_ROWS do
     })
 end
 
--- panel (bottom section, hidden by default)
 local pH = PANEL_H - 20
 local panelBG = newD("Square", { Size = Vector2.new(W.w - 16, pH), Position = Vector2.new(W.x + 8, W.y + W.h - pH - 24), Color = Color3.fromRGB(20, 20, 30), Filled = true, Visible = false })
 local panelBorder = newD("Square", { Size = Vector2.new(W.w - 16, pH), Position = Vector2.new(W.x + 8, W.y + W.h - pH - 24), Color = THEME.ACCENT, Filled = false, Transparency = 0.4, Visible = false })
@@ -122,7 +90,6 @@ local panelTitle = newD("Text", { Text = "", Size = 12, Position = Vector2.new(W
 local panelBody = newD("Text", { Text = "", Size = 11, Position = Vector2.new(W.x + 14, W.y + W.h - pH - 4), Color = THEME.TEXT, Visible = false, Outline = true })
 local panelHint = newD("Text", { Text = "[R] replay  [C] copy  [P] preset  [I] inspect  |  [X] close panel", Size = 11, Position = Vector2.new(W.x + 14, W.y + W.h - 24), Color = THEME.DIM, Visible = false, Outline = true })
 
--- ═══ PANEL LOGIC ═══
 local function panelShow(rec)
     UP.selected = rec
     UP.panelOpen = true
@@ -153,7 +120,7 @@ local function panelAction(key)
             setclipboard(table.concat(rec.args, ", "))
             print("[uiplus] args copied to clipboard")
         else
-            print("[uiplus] setclipboard unavailable in this executor")
+            print("[uiplus] setclipboard unavailable")
         end
     elseif key == "P" then
         SS2.savePreset("uiplus_" .. rec.id, rec.id)
@@ -162,7 +129,6 @@ local function panelAction(key)
     end
 end
 
--- ═══ SCROLL ═══
 local function maxScroll()
     local m = #SS2.log - FEED_ROWS
     return (m > 0) and m or 0
@@ -211,7 +177,6 @@ local function scrollBy(delta)
     end
 end
 
--- ═══ FEED RENDER ═══
 local function renderFeed()
     local startIdx
     if UP.pinned then
@@ -235,7 +200,6 @@ local function renderFeed()
     updateScrollbar()
 end
 
--- ═══ INPUT ═══
 UIS.InputBegan:Connect(function(input, processed)
     if processed then return end
     if input.UserInputType == Enum.UserInputType.MouseButton1
@@ -244,28 +208,23 @@ UIS.InputBegan:Connect(function(input, processed)
         local px, py = m.X, m.Y
         if px < W.x or px > W.x + W.w or py < W.y or py > W.y + W.h then return end
 
-        -- close button
         if px >= W.x + W.w - 26 and py <= W.y + W.headerH then
             unloadAll()
             return
         end
-        -- pause button
         if px >= W.x + W.w - 100 and px <= W.x + W.w - 40 and py <= W.y + W.headerH then
             SS2.togglePause()
             return
         end
-        -- header drag
         if py <= W.y + W.headerH then
             W.dragging = true
             W.off = { x = px - W.x, y = py - W.y }
             return
         end
-        -- panel close (click anywhere in panel region when open)
         if UP.panelOpen and py >= W.y + W.h - PANEL_H then
             panelHide()
             return
         end
-        -- feed row click → expand
         if not UP.panelOpen then
             for i = 1, FEED_ROWS do
                 local ry0 = W.y + W.headerH + 4 + (i - 1) * ROW_H
@@ -298,7 +257,6 @@ UIS.InputEnded:Connect(function(input)
     end
 end)
 
--- keyboard shortcuts while panel open
 UIS.InputBegan:Connect(function(input, processed)
     if processed or not UP.panelOpen then return end
     if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
@@ -311,7 +269,6 @@ UIS.InputBegan:Connect(function(input, processed)
     end
 end)
 
--- ═══ MAIN LOOP ═══
 local lastRender = 0
 task.spawn(function()
     while SS2.uiplusOwner do
@@ -324,7 +281,6 @@ task.spawn(function()
                 pcall(function() d.Position = d.Position + Vector2.new(dx, dy) end)
             end
         end
-        -- feed render: pinned refreshes live; scrolled view refreshes on demand only
         if UP.pinned and os.clock() - lastRender > 0.35 then
             lastRender = os.clock()
             renderFeed()
@@ -335,6 +291,7 @@ end)
 
 renderFeed()
 
-print("[SS2-uiplus] UI+ LIVE — scroll (wheel/scrollbar) | click rows to expand")
+if SS2.journalAdd then SS2.journalAdd("UIPLUS", "feed window upgraded — sole owner") end
+
+print("[SS2-uiplus] UI+ LIVE — scroll | click rows to expand")
 print("[SS2-uiplus] panel keys: R replay | C copy | P preset | I inspect | X close")
-SS2.journalAdd and SS2.journalAdd("UIPLUS", "feed window upgraded — sole owner")
