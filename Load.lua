@@ -12,7 +12,7 @@
 -- ════════════════════════════════════════════════════════════
 
 print("╔══════════════════════════════════════════╗")
-print("║  SIMPLYSPIRITED v2.1 — DRAW EDITION      ║")
+print("║  SIMPLYSPIRITED v2.3 — DRAW EDITION      ║")
 print("║  operator: SHADOWMILESC                  ║")
 print("╚══════════════════════════════════════════╝")
 
