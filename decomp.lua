@@ -1,15 +1,9 @@
 -- ════════════════════════════════════════════════════════════
---  SIMPLYSPIRITED v2.0 — ADVANCED DECOMPILER
+--  SIMPLYSPIRITED v2.4 — ADVANCED DECOMPILER
 --  For SHADOWMILESC (computerizedcarrier2)
 --  ────────────────────────────────────────────────────────────
---  Layer 1: SOURCE read (.Source when the executor can)
---  Layer 2: BYTECODE capture (getscriptbytecode) for protected
---  Layer 3: CONSTANT MINING — extracts all strings, numbers,
---           and readable sequences from bytecode. Protected
---           scripts still confess their config tables, remote
---           names, URLs, and API strings.
---  Browser: game script tree with per-script actions
---  Output: SimplySpirited/decomp/ on Delta workspace
+--  L1: source read | L2: bytecode capture | L3: constant mining
+--  Output: SimplySpirited/decomp/
 -- ════════════════════════════════════════════════════════════
 
 print("[SS2-decomp] loading decompiler...")
@@ -22,7 +16,6 @@ local P = Players.LocalPlayer
 
 SS2.decomp = {}
 
--- ═══════════ HELPERS ═══════════
 local function sanitizePath(full)
     return full:gsub("[^%w_]", "_"):sub(1, 130)
 end
@@ -37,27 +30,15 @@ local function hasSource(s)
     return ok and type(src) == "string" and #src > 0, src
 end
 
--- ═══════════ LAYER 3: CONSTANT MINING ═══════════
--- Bytecode is binary, but Luau embeds all string constants and
--- numeric literals in readable/parseable form. We extract:
---   - printable string runs (>= 4 chars)
---   - suspicious keywords (remote names, URLs, "Fire", "Gold"...)
 local function mineConstants(bytecode)
-    local found = {
-        strings = {},
-        urls = {},
-        remotes = {},
-        numbers = {},
-    }
+    local found = { strings = {}, urls = {}, remotes = {} }
     if type(bytecode) ~= "string" or #bytecode == 0 then return found end
 
-    -- printable string runs
     for s in bytecode:gmatch("[%w%p%s%-%_%.%:%/%\\]{4,}") do
-        -- filter binary noise: keep runs that are mostly readable
         local readable = 0
         for i = 1, #s do
             local c = s:byte(i)
-            if (c >= 32 and c <= 126) then readable = readable + 1 end
+            if c >= 32 and c <= 126 then readable = readable + 1 end
         end
         if readable / #s > 0.85 and #s >= 4 then
             local clean = s:match("^%s*(.-)%s*$")
@@ -67,12 +48,10 @@ local function mineConstants(bytecode)
         end
     end
 
-    -- URLs
     for u in bytecode:gmatch("https?://[%w%.%-%_/%?%=%&]+") do
         found.urls[#found.urls + 1] = u
     end
 
-    -- likely remote/API names (camelCase or snake_case words near common verbs)
     local keywords = { "Fire", "Invoke", "Remote", "Server", "Client", "Buy", "Purchase",
         "Damage", "Coins", "Cash", "Gold", "Gems", "Spawn", "Craft", "Sell", "Reward",
         "Points", "Tokens", "Level", "XP", "Shop", "Trade" }
@@ -84,7 +63,6 @@ local function mineConstants(bytecode)
         end
     end
 
-    -- dedupe
     local function dedupe(t)
         local seen, out = {}, {}
         for _, v in ipairs(t) do
@@ -103,8 +81,6 @@ local function mineConstants(bytecode)
 end
 SS2.decomp.mineConstants = mineConstants
 
--- ═══════════ SINGLE SCRIPT DECOMPILE ═══════════
--- returns report string, saves layers to disk
 function SS2.decomp.script(s)
     if not s or not (s:IsA("LocalScript") or s:IsA("ModuleScript")) then
         return nil, "not a script"
@@ -118,29 +94,25 @@ function SS2.decomp.script(s)
         "╚══════════════════════════════════════╝",
     }
 
-    -- LAYER 1: source
     local hasSrc, src = hasSource(s)
     if hasSrc then
         local path = "SimplySpirited/decomp/" .. clean .. ".src.lua"
         pcall(function() writefile(path, "-- SOURCE: " .. s:GetFullName() .. "\n" .. src) end)
-        report[#report + 1] = "[L1] SOURCE: captured (" .. #src .. " chars) -> " .. path
+        report[#report + 1] = "[L1] SOURCE: captured (" .. #src .. " chars)"
     else
-        report[#report + 1] = "[L1] SOURCE: inaccessible (protected or executor limitation)"
+        report[#report + 1] = "[L1] SOURCE: inaccessible"
     end
 
-    -- LAYER 2: bytecode
     local bc = nil
     pcall(function() bc = getscriptbytecode(s) end)
     if type(bc) == "string" and #bc > 0 then
         local path = "SimplySpirited/decomp/" .. clean .. ".bytecode"
         pcall(function() writefile(path, bc) end)
-        report[#report + 1] = "[L2] BYTECODE: captured (" .. #bc .. " bytes) -> " .. path
+        report[#report + 1] = "[L2] BYTECODE: captured (" .. #bc .. " bytes)"
 
-        -- LAYER 3: constants
         local mined = mineConstants(bc)
         local mpath = "SimplySpirited/decomp/" .. clean .. ".constants.txt"
-        local mOut = {}
-        mOut[#mOut + 1] = "=== CONSTANTS: " .. s:GetFullName() .. " ==="
+        local mOut = { "=== CONSTANTS: " .. s:GetFullName() .. " ===" }
         mOut[#mOut + 1] = "URLs found: " .. #mined.urls
         for _, u in ipairs(mined.urls) do mOut[#mOut + 1] = "  " .. u end
         mOut[#mOut + 1] = "API/remote-name candidates: " .. #mined.remotes
@@ -148,19 +120,17 @@ function SS2.decomp.script(s)
         mOut[#mOut + 1] = "string constants: " .. #mined.strings
         for _, st in ipairs(mined.strings) do mOut[#mOut + 1] = "  " .. st:sub(1, 200) end
         pcall(function() writefile(mpath, table.concat(mOut, "\n")) end)
-        report[#report + 1] = ("[L3] CONSTANTS: %d strings, %d urls, %d api-candidates -> %s"):format(
-            #mined.strings, #mined.urls, #mined.remotes, mpath)
+        report[#report + 1] = ("[L3] CONSTANTS: %d strings, %d urls, %d api-candidates"):format(
+            #mined.strings, #mined.urls, #mined.remotes)
     else
-        report[#report + 1] = "[L2] BYTECODE: capture failed (getscriptbytecode unavailable or blocked)"
+        report[#report + 1] = "[L2] BYTECODE: capture failed"
     end
 
     local text = table.concat(report, "\n")
     print(text)
     return text
 end
-SS2.decomp.script = SS2.decomp.script
 
--- ═══════════ BULK DUMP ═══════════
 function SS2.decomp.bulk(containerName, maxScripts)
     containerName = containerName or "ReplicatedStorage"
     maxScripts = maxScripts or 200
@@ -171,7 +141,6 @@ function SS2.decomp.bulk(containerName, maxScripts)
         local manifest = {
             "SIMPLYSPIRITED DECOMP BULK — " .. SS2.game,
             "container: " .. containerName .. " | date: " .. os.date(),
-            "operator: SHADOWMILESC",
             "────────────────────────────────",
         }
         for _, d in ipairs(root:GetDescendants()) do
@@ -203,8 +172,7 @@ function SS2.decomp.bulk(containerName, maxScripts)
                                 table.concat(mOut, "\n"))
                         end)
                         nBC = nBC + 1
-                        manifest[#manifest + 1] = ("[BC ] %s (%d bytes, %d constants)"):format(
-                            d:GetFullName(), #bc, #mined.strings)
+                        manifest[#manifest + 1] = ("[BC ] %s (%d bytes)"):format(d:GetFullName(), #bc)
                     else
                         nSkip = nSkip + 1
                         manifest[#manifest + 1] = ("[---] %s (inaccessible)"):format(d:GetFullName())
@@ -216,13 +184,12 @@ function SS2.decomp.bulk(containerName, maxScripts)
         manifest[#manifest + 1] = "────────────────────────────────"
         manifest[#manifest + 1] = ("totals: %d source | %d bytecode | %d inaccessible"):format(nSrc, nBC, nSkip)
         writefile("SimplySpirited/decomp/_manifest.txt", table.concat(manifest, "\n"))
-        print(("[SS2-decomp] BULK DONE: %d source, %d bytecode, %d skipped -> SimplySpirited/decomp/"):format(nSrc, nBC, nSkip))
-        SS2.journalAdd and SS2.journalAdd("DECOMP", ("bulk %s: %d src, %d bc"):format(containerName, nSrc, nBC))
+        print(("[SS2-decomp] BULK DONE: %d source, %d bytecode, %d skipped"):format(nSrc, nBC, nSkip))
+        if SS2.journalAdd then SS2.journalAdd("DECOMP", ("bulk %s: %d src, %d bc"):format(containerName, nSrc, nBC)) end
     end)
 end
 SS2.decomp.bulk = SS2.decomp.bulk
 
--- ═══════════ SCRIPT TREE BROWSER (console) ═══════════
 function SS2.decomp.tree(containerName)
     containerName = containerName or "ReplicatedStorage"
     local root = containerName == "Players" and P or game:GetService(containerName)
@@ -232,36 +199,30 @@ function SS2.decomp.tree(containerName)
         if d:IsA("LocalScript") or d:IsA("ModuleScript") then
             n = n + 1
             local hasSrc = hasSource(d)
-            print(("  %s %s%s"):format(
-                hasSrc and "[src]" or "[??]", 
-                string.rep("  ", 0),
-                d:GetFullName()))
-            if n > 80 then print("  ... (truncated at 80 — use bulk dump for full scan)") break end
+            print(("  %s %s"):format(hasSrc and "[src]" or "[??]", d:GetFullName()))
+            if n > 80 then print("  ... (truncated)") break end
         end
     end
-    print("  total visible: " .. n)
-    print("  decompile one: SS2.decomp.script(game.Path.To.Script)")
-    print("  decompile all: SS2.decomp.bulk('" .. containerName .. "', 200)")
+    print("  total: " .. n)
+    print("  one: SS2.decomp.script(game.Path.To.Script)")
+    print("  all: SS2.decomp.bulk('" .. containerName .. "', 200)")
 end
 SS2.decomp.tree = SS2.decomp.tree
 
--- ═══════════ QUICK TARGETS (the usual suspects) ═══════════
 function SS2.decomp.quick()
     print("═══ QUICK DECOMPILE: high-value targets ═══")
     local targets = {}
-    -- main game modules in ReplicatedStorage
     for _, d in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
         if d:IsA("ModuleScript") and d.Name:lower():match("config|setting|main|init|remote|api|data") then
             targets[#targets + 1] = d
         end
     end
-    -- starter player scripts
     for _, d in ipairs(game:GetService("StarterPlayer"):GetDescendants()) do
         if d:IsA("LocalScript") or d:IsA("ModuleScript") then
             targets[#targets + 1] = d
         end
     end
-    print("  found " .. #targets .. " high-value targets")
+    print("  found " .. #targets .. " targets")
     for i, t in ipairs(targets) do
         if i > 12 then print("  ...") break end
         SS2.decomp.script(t)
@@ -270,9 +231,4 @@ end
 SS2.decomp.quick = SS2.decomp.quick
 
 print("[SS2-decomp] decompiler LIVE")
-print("[decomp] console commands:")
-print("  SS2.decomp.tree('ReplicatedStorage')      — browse script tree")
-print("  SS2.decomp.script(game.Path.To.Script)    — full 3-layer decompile")
-print("  SS2.decomp.bulk('ReplicatedStorage', 200) — bulk dump container")
-print("  SS2.decomp.quick()                        — auto-hit high-value targets")
-print("  SS2.decomp.mineConstants(bytecode)        — raw constant mining")
+print("[decomp] SS2.decomp.tree / .script / .bulk / .quick / .mineConstants")
