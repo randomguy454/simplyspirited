@@ -1,14 +1,9 @@
 -- ════════════════════════════════════════════════════════════
---  SIMPLYSPIRITED v2.3 — GOVERNOR (flood protection)
+--  SIMPLYSPIRITED v2.4 — GOVERNOR (flood protection)
 --  For SHADOWMILESC (computerizedcarrier2)
 --  ────────────────────────────────────────────────────────────
---  • Rolling rate meter (calls/second, colored)
---  • 3-stage flood response:
---    S1: adaptive sampling (1/N, new remotes always full-rate)
---    S2: auto-pause with timed retry
---    S3: surgical per-remote mute for the flood source
---  • Preserves "interesting" calls: remotes with <20 lifetime
---    calls never get sampled
+--  • Rolling rate meter • 3-stage flood response
+--  • Sampling never touches young remotes (<20 calls)
 -- ════════════════════════════════════════════════════════════
 
 print("[SS2-gov] arming governor...")
@@ -16,21 +11,19 @@ print("[SS2-gov] arming governor...")
 local SS2 = getgenv().SS2
 if not SS2 then warn("[SS2-gov] core must load first") return end
 
--- ═══ CONFIG ═══
 local CFG = {
-    S1_RATE = 300,     -- calls/sec: sampling begins
-    S2_RATE = 1000,    -- calls/sec: auto-pause
-    S2_SUSTAIN = 3,    -- seconds above S2 to trigger pause
-    COOLDOWN = 10,     -- seconds before auto-retry after pause
-    MUTE_RATIO = 0.95, -- single remote share of flood to trigger mute offer
+    S1_RATE = 300,
+    S2_RATE = 1000,
+    S2_SUSTAIN = 3,
+    COOLDOWN = 10,
 }
 
 SS2.governor = {
     rate = 0,
-    mode = "NORMAL",          -- NORMAL / SAMPLING / PAUSED
-    sampleN = 1,              -- record every Nth call
+    mode = "NORMAL",
+    sampleN = 1,
     sampleCounter = 0,
-    muted = {},               -- [remotePath] = true
+    muted = {},
     windowStart = os.clock(),
     windowCount = 0,
     s2Timer = 0,
@@ -38,7 +31,6 @@ SS2.governor = {
 
 local G = SS2.governor
 
--- ═══ RATE METER ═══
 local function tickRate()
     local now = os.clock()
     G.windowCount = G.windowCount + 1
@@ -46,14 +38,11 @@ local function tickRate()
         G.rate = G.windowCount / (now - G.windowStart)
         G.windowStart = now
         G.windowCount = 0
-        return true -- new second: re-evaluate thresholds
+        return true
     end
     return false
 end
 
--- ═══ TAP THE RECORDER ═══
--- wraps SS2.recordCall: counts rate, applies sampling + mute
--- BEFORE core's recording logic runs
 local realRecord = SS2.recordCall
 if not realRecord then
     warn("[SS2-gov] core recorder not found — governor idle")
@@ -61,15 +50,12 @@ if not realRecord then
 end
 
 SS2.recordCall = function(remote, args, direction)
-    -- rate accounting
     local newSecond = tickRate()
 
-    -- muted remote? count the attempt, drop the record
     if G.muted[remote.Name] or (SS2.remotes[remote] and G.muted[SS2.remotes[remote].path]) then
         return
     end
 
-    -- stage evaluation on second boundaries
     if newSecond and G.mode ~= "PAUSED" then
         if G.rate >= CFG.S2_RATE then
             G.s2Timer = G.s2Timer + 1
@@ -79,7 +65,7 @@ SS2.recordCall = function(remote, args, direction)
                 G.s2Timer = 0
                 warn(("[governor] FLOOD %.0f/s — CAPTURE AUTO-PAUSED (resumes in %ds)"):format(
                     G.rate, CFG.COOLDOWN))
-                SS2.journalAdd and SS2.journalAdd("GOV", "flood pause at " .. math.floor(G.rate) .. "/s")
+                if SS2.journalAdd then SS2.journalAdd("GOV", "flood pause at " .. math.floor(G.rate) .. "/s") end
                 task.delay(CFG.COOLDOWN, function()
                     G.mode = "NORMAL"
                     G.sampleN = 5
@@ -103,17 +89,14 @@ SS2.recordCall = function(remote, args, direction)
         end
     end
 
-    -- paused: drop everything
     if G.mode == "PAUSED" then return end
 
-    -- sampling: new remotes (few lifetime calls) always pass —
-    -- never lose first-contact intel
     if G.mode == "SAMPLING" and G.sampleN > 1 then
         local prof = SS2.remotes[remote]
         if prof and prof.calls >= 20 then
             G.sampleCounter = G.sampleCounter + 1
             if G.sampleCounter % G.sampleN ~= 0 then
-                return -- sampled out
+                return
             end
         end
     end
@@ -121,10 +104,9 @@ SS2.recordCall = function(remote, args, direction)
     return realRecord(remote, args, direction)
 end
 
--- ═══ MANUAL CONTROLS ═══
 function SS2.muteRemote(nameOrPath)
     G.muted[nameOrPath] = true
-    print("[governor] muted: " .. nameOrPath .. " (counting continues, recording stops)")
+    print("[governor] muted: " .. nameOrPath)
 end
 
 function SS2.unmuteRemote(nameOrPath)
@@ -148,13 +130,5 @@ function SS2.governorStatus()
         (function() local n = 0 for _ in pairs(G.muted) do n = n + 1 end return n end)()))
 end
 
--- ═══ HUD STAT INJECTION ═══
--- appends rate to the feed window's stat line if present
-task.spawn(function()
-    while SS2.feedWin and SS2.feedWin.open do
-        task.wait(1)
-    end
-end)
-
-print("[SS2-gov] governor LIVE — S1 sample @" .. CFG.S1_RATE .. "/s, S2 pause @" .. CFG.S2_RATE .. "/s")
-print("[governor] commands: SS2.muteRemote('name') | SS2.unmuteRemote | SS2.muteList | SS2.governorStatus")
+print("[SS2-gov] governor LIVE — S1 @" .. CFG.S1_RATE .. "/s, S2 @" .. CFG.S2_RATE .. "/s")
+print("[governor] SS2.muteRemote / unmuteRemote / muteList / governorStatus")
