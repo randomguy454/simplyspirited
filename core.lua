@@ -1,34 +1,30 @@
 --[[
-    simplyspirited v4.6 — core engine
+    simplyspirited v4.7 — core engine
     SHADOWMILESC / computerizedcarrier2
 
-    the heart of the suite. universal by construction:
-    discovers remotes, watches values, tracks players.
-    assumes nothing about the game it lands in.
+    universal remote intelligence. assumes nothing about the game.
 
-    capture architecture (v3.1+, kept):
+    capture architecture:
       INBOUND  = OnClientEvent connections (reliable)
       OUTBOUND = namecall net (total coverage)
-      per-remote hookfunction layer removed — it was the
-      fragile half; the net is the whole game.
+      per-remote hookfunction layer removed — the net is whole game.
 
-    v4.6 additions:
-      - capture health: calls/sec EMA, filter-drop counts
-      - adaptive rescan: 2s intervals for the first minute
-        (boot race), then 15s steady-state
-      - runtime-editable verbosity keywords, persisted
-      - every swallowed error journaled, never silent
-      - discovery diff: rescan reports what it newly found
+    v4.7 additions:
+      - gameFolder(): game-scoped folder naming for every tier
+      - adaptive rescan (2s boot window, then 15s steady)
+      - capture health metrics (EMA rate, drop counters)
+      - runtime-editable filters/keywords, journaled
+      - everything swallowed is counted, nothing silent
 ]]
 
-print("[SS2-core] v4.6 booting...")
+print("[SS2-core] v4.7 booting...")
 
 local Players = game:GetService("Players")
 local P = Players.LocalPlayer
 
 -- ═══════════ STATE ═══════════
 getgenv().SS2 = {
-    version = "4.6",
+    version = "4.7",
     game = game.Name,
     placeId = game.PlaceId,
     jobId = game.JobId,
@@ -47,7 +43,7 @@ getgenv().SS2 = {
         "data", "save", "auth", "key", "remote",
     },
 
-    filters = {               -- name-fragments to drop entirely
+    filters = {               -- name-fragments dropped entirely
         heartbeat = true, stepped = true, renderstepped = true,
         input = true, mouse = true, camera = true, touch = true,
         keyframe = true, animation = true, physics = true,
@@ -57,14 +53,12 @@ getgenv().SS2 = {
     capture = true,
     startTime = os.clock(),
 
-    -- v4.6 health metrics
     health = {
-        callsEMA = 0,          -- smoothed calls/sec
-        lastSecond = 0,
+        callsEMA = 0,
         thisSecond = 0,
-        filterDropped = 0,     -- calls dropped by name filters
-        verbositySuppressed = 0, -- captured-but-not-printed
-        rescanFinds = 0,       -- remotes the rescans recovered
+        filterDropped = 0,
+        verbositySuppressed = 0,
+        rescanFinds = 0,
     },
 }
 local SS2 = getgenv().SS2
@@ -76,6 +70,20 @@ local function journal(tag, text)
     if #SS2.journal > 500 then table.remove(SS2.journal, 1) end
 end
 SS2.journalAdd = journal
+
+-- ════════════════════════════════════════════════════════════
+-- v4.7: GAME-SCOPED FOLDER NAMING
+-- every tier's output lands under the game's own folder
+-- ════════════════════════════════════════════════════════════
+local function gameFolderName()
+    local name = tostring(SS2.game or game.Name)
+    name = name:gsub("[^%w]", "_")
+    name = name:gsub("_+", "_")
+    name = name:match("^_*(.-)_*$") or name
+    if #name < 2 then name = "UnknownGame" end
+    return name
+end
+SS2.gameFolder = gameFolderName
 
 -- ═══════════ DECONSTRUCTOR ═══════════
 local function describe(v, depth)
@@ -132,7 +140,7 @@ local function tickHealth()
     SS2.health.thisSecond = SS2.health.thisSecond + 1
 end
 
--- ═══════════ CALL RECORDER ═══════════
+-- ═══════════ CALL RECORDER (verbosity-gated) ═══════════
 local callId = 0
 
 local function recordCall(remote, args, direction)
@@ -264,14 +272,13 @@ game.DescendantAdded:Connect(function(d)
     end
 end)
 
--- ═══════════ v4.6 ADAPTIVE RESCAN ═══════════
--- boot races slow games. strategy: aggressive early (2s interval
--- for the first minute — catches the load wave), then 15s steady.
--- reports the diff: what each sweep newly found.
+-- ═══════════ ADAPTIVE RESCAN (v4.6, kept) ═══════════
+-- aggressive early (boot-race recovery), then steady 15s.
+-- reports every recovery into the journal.
 task.spawn(function()
     local sweeps = 0
     while true do
-        local waitTime = (sweeps < 30) and 2 or 15  -- first ~1min aggressive
+        local waitTime = (sweeps < 30) and 2 or 15
         task.wait(waitTime)
         sweeps = sweeps + 1
         pcall(function()
@@ -285,7 +292,7 @@ task.spawn(function()
             if found > 0 then
                 SS2.health.rescanFinds = SS2.health.rescanFinds + found
                 journal("RESCAN", "recovered " .. found .. " late-loaded remotes")
-                print(("[SS2-core] rescan recovered " .. found .. " late remotes"))
+                print("[SS2-core] rescan recovered " .. found .. " late remotes")
             end
         end)
     end
@@ -401,7 +408,7 @@ Players.PlayerRemoving:Connect(function(pl)
     SS2.players[pl] = nil
 end)
 
--- ═══════════ v4.6 RUNTIME-EDITABLE KEYWORDS ═══════════
+-- ═══════════ RUNTIME-EDITABLE KEYWORDS ═══════════
 function SS2.addKeyword(kw)
     if kw and #kw > 1 then
         table.insert(SS2.keywords, kw:lower())
@@ -415,11 +422,10 @@ function SS2.listKeywords()
     print("  " .. table.concat(SS2.keywords, ", "))
 end
 
--- ═══════════ v4.6 HEALTH REPORT ═══════════
+-- ═══════════ HEALTH REPORT ═══════════
 task.spawn(function()
     while true do
         task.wait(1)
-        -- EMA smoothing over seconds
         local inst = SS2.health.thisSecond
         SS2.health.callsEMA = SS2.health.callsEMA * 0.7 + inst * 0.3
         SS2.health.thisSecond = 0
@@ -437,10 +443,11 @@ function SS2.healthReport()
         h.filterDropped, h.verbositySuppressed))
     print(("  rescan-recovered remotes: %d"):format(h.rescanFinds))
     print(("  journal entries: %d"):format(#SS2.journal))
+    print(("  game folder: SimplySpirited/%s/"):format(gameFolderName()))
 end
 SS2.healthReport = SS2.healthReport
 
--- ═══════════ FILTER/KEYWORD RUNTIME EDITS ═══════════
+-- ═══════════ FILTER RUNTIME EDITS ═══════════
 function SS2.addFilter(fragment)
     if fragment and #fragment > 1 then
         SS2.filters[fragment:lower()] = true
@@ -463,10 +470,11 @@ end
 -- ═══════════ BOOT ═══════════
 local remoteCount = scanAllRemotes()
 
-journal("BOOT", "v4.6 online in " .. SS2.game .. " | " .. remoteCount .. " remotes")
+journal("BOOT", "v4.7 online in " .. SS2.game .. " | " .. remoteCount .. " remotes")
 print("[SS2-core] discovered " .. remoteCount .. " remotes (inbound watch)")
 print("[SS2-core] namecall net: " .. tostring(SS2.metaHooked) .. " (outbound watch)")
 print("[SS2-core] adaptive rescan live | health metrics live")
-print("[SS2-core] verbosity: " .. SS2.verbosity .. " | runtime-editable filters/keywords")
+print("[SS2-core] game folder: SimplySpirited/" .. gameFolderName() .. "/")
+print("[SS2-core] verbosity: " .. SS2.verbosity .. " | filters/keywords runtime-editable")
 print("[SS2-core] engine ready — SS2.healthReport() for capture vitals")
 getgenv().SS2_READY = true
