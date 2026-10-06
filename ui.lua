@@ -1,15 +1,13 @@
 -- ════════════════════════════════════════════════════════════
---  SIMPLYSPIRITED v3.2 — UI (FIXED)
+--  SIMPLYSPIRITED v4.1 — SIMPLESPY-CLASS UI, RED EDITION
 --  For SHADOWMILESC (computerizedcarrier2)
 --  ────────────────────────────────────────────────────────────
---  • ALL windows draggable (main + detail card by its header)
---  • Tabs: LIVE CALLS / REMOTES / DECOMPILER
---  • Click-to-expand calls with action buttons
---  • Decompiler tabbed: container picker, bulk, quick, tree
---  Requires core.lua. Engine functions from callers/watch.
+--  Layout: sidebar list + code panel + button grid (SimpleSpy
+--  geometry), red theme, 4 tabs. All windows draggable.
+--  Requires core.lua. Powers from callers/watch/decomp.
 -- ════════════════════════════════════════════════════════════
 
-print("[SS2-ui] building interface v3.2...")
+print("[SS2-ui] v4.1 building RED interface...")
 
 local SS2 = getgenv().SS2
 if not SS2 then warn("[SS2-ui] core must load first") return end
@@ -26,29 +24,34 @@ pcall(function()
     end
 end)
 
+-- ═══ RED THEME ═══
 local T = {
-    BG     = Color3.fromRGB(15, 15, 20),
-    PANEL  = Color3.fromRGB(24, 24, 32),
-    CARD   = Color3.fromRGB(32, 32, 42),
-    ACCENT = Color3.fromRGB(88, 140, 255),
-    GREEN  = Color3.fromRGB(60, 220, 120),
-    RED    = Color3.fromRGB(255, 80, 80),
-    YELL   = Color3.fromRGB(240, 190, 90),
-    PURP   = Color3.fromRGB(170, 130, 255),
-    TEXT   = Color3.fromRGB(235, 235, 240),
-    DIM    = Color3.fromRGB(150, 150, 165),
+    BG      = Color3.fromRGB(24, 10, 12),
+    PANEL   = Color3.fromRGB(38, 14, 18),
+    CARD    = Color3.fromRGB(52, 18, 24),
+    SIDEBAR = Color3.fromRGB(30, 11, 15),
+    ACCENT  = Color3.fromRGB(220, 50, 60),
+    ACCENT2 = Color3.fromRGB(255, 80, 90),
+    GREEN   = Color3.fromRGB(60, 220, 120),
+    YELL    = Color3.fromRGB(240, 190, 90),
+    PURP    = Color3.fromRGB(190, 130, 255),
+    TEXT    = Color3.fromRGB(245, 235, 238),
+    DIM     = Color3.fromRGB(160, 120, 130),
+    CODEBG  = Color3.fromRGB(18, 8, 10),
 }
+SS2.theme = T
 
 local function corner(o, r)
     local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, r or 8)
+    c.CornerRadius = UDim.new(0, r or 6)
     c.Parent = o
 end
-local function stroke(o, col)
+local function stroke(o, col, th)
     local s = Instance.new("UIStroke")
     s.Color = col or T.ACCENT
-    s.Thickness = 1
+    s.Thickness = th or 1
     s.Parent = o
+    return s
 end
 
 local gui = Instance.new("ScreenGui")
@@ -60,22 +63,24 @@ local okP = pcall(function()
 end)
 if not okP then gui.Parent = P:WaitForChild("PlayerGui") end
 
--- ═══ MAIN WINDOW ═══
+-- ═══ MAIN WINDOW (SimpleSpy geometry: 680x430) ═══
 local win = Instance.new("Frame")
-win.Size = UDim2.new(0, 500, 0, 380)
-win.Position = UDim2.new(0, 30, 0, 50)
+win.Size = UDim2.new(0, 680, 0, 430)
+win.Position = UDim2.new(0, 40, 0, 40)
 win.BackgroundColor3 = T.BG
 win.BorderSizePixel = 0
 win.Active = true
-corner(win, 10)
-stroke(win, T.ACCENT)
+corner(win, 8)
+stroke(win, T.ACCENT, 1.5)
 win.Parent = gui
 
+-- ═══ DRAG ═══
+local dragging, dStart, dPos = false, nil, nil
 local header = Instance.new("Frame")
 header.Size = UDim2.new(1, 0, 0, 30)
 header.BackgroundColor3 = T.PANEL
 header.BorderSizePixel = 0
-corner(header, 10)
+corner(header, 8)
 header.Parent = win
 local hFill = Instance.new("Frame")
 hFill.Size = UDim2.new(1, 0, 0, 12)
@@ -84,63 +89,70 @@ hFill.BackgroundColor3 = T.PANEL
 hFill.BorderSizePixel = 0
 hFill.Parent = header
 
-local hTitle = Instance.new("TextLabel")
-hTitle.Size = UDim2.new(0, 320, 1, 0)
-hTitle.Position = UDim2.new(0, 12, 0, 0)
-hTitle.BackgroundTransparency = 1
-hTitle.Text = "SIMPLYSPIRITED v3.2 — " .. SS2.game:sub(1, 18)
-hTitle.Font = Enum.Font.GothamBold
-hTitle.TextSize = 14
-hTitle.TextColor3 = T.TEXT
-hTitle.TextXAlignment = Enum.TextXAlignment.Left
-hTitle.Parent = header
+local logo = Instance.new("TextLabel")
+logo.Size = UDim2.new(0, 200, 1, 0)
+logo.Position = UDim2.new(0, 12, 0, 0)
+logo.BackgroundTransparency = 1
+logo.Text = "SIMPLYSPIRITED v4.1"
+logo.Font = Enum.Font.GothamBold
+logo.TextSize = 15
+logo.TextColor3 = T.ACCENT2
+logo.TextXAlignment = Enum.TextXAlignment.Left
+logo.Parent = header
+
+local minBtn = Instance.new("TextButton")
+minBtn.Size = UDim2.new(0, 26, 0, 22)
+minBtn.Position = UDim2.new(1, -62, 0, 4)
+minBtn.BackgroundTransparency = 1
+minBtn.Text = "—"
+minBtn.Font = Enum.Font.GothamBold
+minBtn.TextSize = 14
+minBtn.TextColor3 = T.DIM
+minBtn.Parent = header
 
 local closeBtn = Instance.new("TextButton")
 closeBtn.Size = UDim2.new(0, 26, 0, 22)
 closeBtn.Position = UDim2.new(1, -32, 0, 4)
-closeBtn.BackgroundColor3 = T.RED
+closeBtn.BackgroundTransparency = 1
 closeBtn.Text = "X"
 closeBtn.Font = Enum.Font.GothamBold
-closeBtn.TextSize = 12
-closeBtn.TextColor3 = Color3.new(1, 1, 1)
-corner(closeBtn, 6)
+closeBtn.TextSize = 14
+closeBtn.TextColor3 = T.ACCENT2
 closeBtn.Parent = header
 
--- ═══ UNIVERSAL DRAG MAKER (v3.2: all windows draggable) ═══
-local function makeDraggable(handle, target)
-    local dragging, dStart, dPos = false, nil, nil
-    handle.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            dStart = input.Position
-            dPos = target.Position
-        end
-    end)
-    UIS.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
-        or input.UserInputType == Enum.UserInputType.Touch) then
-            local d = input.Position - dStart
-            target.Position = UDim2.new(dPos.X.Scale, dPos.X.Offset + d.X,
-                dPos.Y.Scale, dPos.Y.Offset + d.Y)
-        end
-    end)
-    UIS.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = false
-        end
-    end)
-end
-makeDraggable(header, win)
-
+local dragging2, d2Start, d2Pos = false, nil, nil
+minBtn.MouseButton1Click:Connect(function()
+    win.Size = UDim2.new(0, 680, 0, 30)
+end)
+-- restore via double click on header
+header.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+    or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dStart = input.Position
+        dPos = win.Position
+    end
+end)
+-- second drag context for the card handled separately
+UIS.InputChanged:Connect(function(input)
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+    or input.UserInputType == Enum.UserInputType.Touch) then
+        local d = input.Position - dStart
+        win.Position = UDim2.new(dPos.X.Scale, dPos.X.Offset + d.X,
+            dPos.Y.Scale, dPos.Y.Offset + d.Y)
+    end
+end)
+UIS.InputEnded:Connect(function()
+    dragging = false
+    dragging2 = false
+end)
 closeBtn.MouseButton1Click:Connect(function()
     gui:Destroy()
     print("[SS2-ui] closed — engine remains")
 end)
 
--- ═══ TABS ═══
-local TABS = { "LIVE CALLS", "REMOTES", "DECOMPILER" }
+-- ═══ TAB STRIP ═══
+local TABS = { "CALLS", "REMOTES", "DECOMPILER", "TOOLS" }
 local tabStrip = Instance.new("Frame")
 tabStrip.Size = UDim2.new(1, 0, 0, 28)
 tabStrip.Position = UDim2.new(0, 0, 0, 30)
@@ -150,401 +162,17 @@ tabStrip.Parent = win
 
 local tabBtns = {}
 local currentTab = 1
-
-local searchBar = Instance.new("TextBox")
-searchBar.Size = UDim2.new(1, -16, 0, 24)
-searchBar.Position = UDim2.new(0, 8, 0, 62)
-searchBar.BackgroundColor3 = T.CARD
-searchBar.PlaceholderText = "search…"
-searchBar.Text = ""
-searchBar.Font = Enum.Font.Code
-searchBar.TextSize = 12
-searchBar.TextColor3 = T.TEXT
-searchBar.ClearTextOnFocus = false
-corner(searchBar, 6)
-searchBar.Parent = win
-
-local content = Instance.new("ScrollingFrame")
-content.Size = UDim2.new(1, -16, 1, -96)
-content.Position = UDim2.new(0, 8, 0, 90)
-content.BackgroundTransparency = 1
-content.BorderSizePixel = 0
-content.ScrollBarThickness = 5
-content.ScrollBarImageColor3 = T.ACCENT
-content.AutomaticCanvasSize = Enum.AutomaticSize.Y
-content.CanvasSize = UDim2.new(0, 0, 0, 0)
-content.Parent = win
-local cLayout = Instance.new("UIListLayout")
-cLayout.Padding = UDim.new(0, 3)
-cLayout.SortOrder = Enum.SortOrder.LayoutOrder
-cLayout.Parent = content
-
-local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, -16, 0, 18)
-status.Position = UDim2.new(0, 8, 1, -22)
-status.BackgroundTransparency = 1
-status.Font = Enum.Font.Code
-status.TextSize = 11
-status.TextColor3 = T.DIM
-status.TextXAlignment = Enum.TextXAlignment.Left
-status.Text = ""
-status.Parent = win
-
--- ═══ DETAIL CARD (draggable by its header) ═══
-local card = Instance.new("Frame")
-card.Size = UDim2.new(0, 360, 0, 250)
-card.Position = UDim2.new(0, 540, 0, 50)
-card.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
-card.BorderSizePixel = 0
-card.Visible = false
-card.Active = true
-card.Parent = gui
-corner(card, 10)
-stroke(card, T.ACCENT, 1.5)
-
-local cardHeader = Instance.new("Frame")
-cardHeader.Size = UDim2.new(1, 0, 0, 28)
-cardHeader.BackgroundColor3 = T.PANEL
-cardHeader.BorderSizePixel = 0
-cardHeader.Parent = card
-local chFill = Instance.new("Frame")
-chFill.Size = UDim2.new(1, 0, 0, 10)
-chFill.Position = UDim2.new(0, 0, 1, -10)
-chFill.BackgroundColor3 = T.PANEL
-chFill.BorderSizePixel = 0
-chFill.Parent = cardHeader
-
-local cTitle = Instance.new("TextLabel")
-cTitle.Size = UDim2.new(1, -60, 1, 0)
-cTitle.Position = UDim2.new(0, 10, 0, 0)
-cTitle.BackgroundTransparency = 1
-cTitle.Font = Enum.Font.GothamBold
-cTitle.TextSize = 12
-cTitle.TextColor3 = T.ACCENT
-cTitle.TextXAlignment = Enum.TextXAlignment.Left
-cTitle.Text = ""
-cTitle.Parent = cardHeader
-
-local cClose = Instance.new("TextButton")
-cClose.Size = UDim2.new(0, 24, 0, 22)
-cClose.Position = UDim2.new(1, -30, 0, 3)
-cClose.BackgroundColor3 = T.RED
-cClose.Text = "X"
-cClose.Font = Enum.Font.GothamBold
-cClose.TextSize = 12
-cClose.TextColor3 = Color3.new(1, 1, 1)
-cClose.Parent = cardHeader
-
-makeDraggable(cardHeader, card)
-
-local cScroll = Instance.new("ScrollingFrame")
-cScroll.Size = UDim2.new(1, -16, 1, -66)
-cScroll.Position = UDim2.new(0, 8, 0, 32)
-cScroll.BackgroundTransparency = 1
-cScroll.BorderSizePixel = 0
-cScroll.ScrollBarThickness = 4
-cScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-cScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-cScroll.Parent = card
-local cLayout2 = Instance.new("UIListLayout")
-cLayout2.Padding = UDim.new(0, 2)
-cLayout2.Parent = cScroll
-
-local cBody = Instance.new("TextLabel")
-cBody.Size = UDim2.new(1, 0, 0, 0)
-cBody.AutomaticSize = Enum.AutomaticSize.Y
-cBody.BackgroundTransparency = 1
-cBody.Font = Enum.Font.Code
-cBody.TextSize = 11
-cBody.TextColor3 = T.TEXT
-cBody.TextXAlignment = Enum.TextXAlignment.Left
-cBody.TextYAlignment = Enum.TextYAlignment.Top
-cBody.TextWrapped = true
-cBody.Text = ""
-cBody.Parent = cScroll
-
-local cBtnRow = Instance.new("Frame")
-cBtnRow.Size = UDim2.new(1, -16, 0, 28)
-cBtnRow.Position = UDim2.new(0, 8, 1, -34)
-cBtnRow.BackgroundTransparency = 1
-cBtnRow.Parent = card
-local cBtnLayout = Instance.new("UIListLayout")
-cBtnLayout.FillDirection = Enum.FillDirection.Horizontal
-cBtnLayout.Padding = UDim.new(0, 6)
-cBtnLayout.Parent = cBtnRow
-
-local currentRec = nil
-local function cBtn(txt, color, cb)
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.new(0, 78, 1, 0)
-    b.BackgroundColor3 = color
-    b.Text = txt
-    b.Font = Enum.Font.GothamBold
-    b.TextSize = 11
-    b.TextColor3 = Color3.new(1, 1, 1)
-    corner(b, 6)
-    b.MouseButton1Click:Connect(cb)
-    b.Parent = cBtnRow
-end
-
-local function showCallDetail(recId)
-    for _, rec in ipairs(SS2.log) do
-        if rec.id == recId then
-            currentRec = rec
-            cTitle.Text = ("CALL #%d — %s"):format(rec.id, rec.name)
-            local body = ("name: %s\nclass: %s\npath: %s\ndir: %s\n\nARGS:\n%s"):format(
-                rec.name, rec.class, rec.path, rec.dir, table.concat(rec.args, "\n"))
-            local prof = SS2.remotes[rec.remote]
-            if prof and prof.callers and next(prof.callers) then
-                local cs = {}
-                for c, n in pairs(prof.callers) do
-                    cs[#cs + 1] = c .. " (" .. n .. "x)"
-                end
-                body = body .. "\n\nCALLERS:\n  " .. table.concat(cs, "\n  ")
-            end
-            cBody.Text = body
-            card.Visible = true
-            return
-        end
-    end
-end
-
-local function showRemoteDetail(r, prof)
-    cTitle.Text = "REMOTE — " .. r.Name
-    local body = ("name: %s\nclass: %s\npath: %s\ncalls: %d (out %d / in %d)\nhooked: %s | metaCaught: %s"):format(
-        r.Name, prof.class, prof.path, prof.calls, prof.out, prof.inn,
-        tostring(prof.hooked), tostring(prof.metaCaught or 0))
-    local sigs = {}
-    for sig, cnt in pairs(prof.sigs) do
-        sigs[#sigs + 1] = { s = sig, c = cnt }
-    end
-    table.sort(sigs, function(a, b) return a.c > b.c end)
-    if #sigs > 0 then
-        body = body .. "\n\nSIGNATURES (by frequency):"
-        for k = 1, math.min(12, #sigs) do
-            body = body .. ("\n  [%dx] %s"):format(sigs[k].c, sigs[k].s)
-        end
-    end
-    if prof.callers and next(prof.callers) then
-        local cs = {}
-        for c, n in pairs(prof.callers) do
-            cs[#cs + 1] = c .. " (" .. n .. "x)"
-        end
-        body = body .. "\n\nCALLERS:\n  " .. table.concat(cs, "\n  ")
-    end
-    cBody.Text = body
-    card.Visible = true
-end
-
-cClose.MouseButton1Click:Connect(function() card.Visible = false end)
-
-cBtn("REPLAY", T.ACCENT, function()
-    if currentRec and SS2.replayId then
-        SS2.replayId(currentRec.id)
-    end
-end)
-cBtn("COPY", T.GREEN, function()
-    if currentRec and setclipboard then
-        setclipboard(table.concat(currentRec.args, ", "))
-    end
-end)
-cBtn("PRESET", T.YELL, function()
-    if currentRec and SS2.savePreset then
-        SS2.savePreset("ui_" .. currentRec.id, currentRec.id)
-    end
-end)
-cBtn("INSPECT", T.PURP, function()
-    if SS2.inspectLast then SS2.inspectLast() end
-end)
-
--- ═══ SHARED ROW HELPER (the bug fix — defined ONCE, used everywhere) ═══
-local function addRow(txt, color, order)
-    local l = Instance.new("TextLabel")
-    l.Size = UDim2.new(1, -6, 0, 18)
-    l.BackgroundTransparency = 1
-    l.Font = Enum.Font.Code
-    l.TextSize = 12
-    l.TextColor3 = color or T.TEXT
-    l.TextXAlignment = Enum.TextXAlignment.Left
-    l.TextTruncate = Enum.TextTruncate.AtEnd
-    l.Text = txt
-    l.LayoutOrder = order
-    l.Parent = content
-    return l
-end
-
--- ═══ TAB RENDERERS ═══
-local function renderCalls()
-    for _, c in ipairs(content:GetChildren()) do
-        if c:IsA("TextLabel") or c:IsA("TextButton") then c:Destroy() end
-    end
-    local term = searchBar.Text:lower()
-    local n = 0
-    for i = #SS2.log, 1, -1 do
-        local rec = SS2.log[i]
-        local hay = (rec.name .. " " .. table.concat(rec.args, " ")):lower()
-        if term == "" or hay:find(term, 1, true) then
-            n = n + 1
-            local b = Instance.new("TextButton")
-            b.Size = UDim2.new(1, -6, 0, 20)
-            b.BackgroundColor3 = T.CARD
-            b.BackgroundTransparency = 0.35
-            b.Font = Enum.Font.Code
-            b.TextSize = 12
-            b.TextColor3 = rec.dir == "OUT" and T.GREEN or T.TEXT
-            b.TextXAlignment = Enum.TextXAlignment.Left
-            b.TextTruncate = Enum.TextTruncate.AtEnd
-            b.Text = ("#%d %s %s | %s"):format(
-                rec.id, rec.dir, rec.name,
-                (rec.args[1] and tostring(rec.args[1]):sub(1, 45)) or "")
-            b.LayoutOrder = n
-            local pad = Instance.new("UIPadding")
-            pad.PaddingLeft = UDim.new(0, 6)
-            pad.Parent = b
-            local id = rec.id
-            b.MouseButton1Click:Connect(function()
-                showCallDetail(id)
-            end)
-            b.Parent = content
-            if n > 150 then
-                addRow("… (150+ shown — use search to narrow)", T.DIM, n + 1)
-                break
-            end
-        end
-    end
-    if n == 0 then
-        addRow(term ~= "" and ("no matches for '" .. term .. "'") or "(no calls yet — play the game)", T.DIM, 1)
-    end
-end
-
-local function renderRemotes()
-    for _, c in ipairs(content:GetChildren()) do
-        if c:IsA("TextLabel") or c:IsA("TextButton") then c:Destroy() end
-    end
-    local ranked = {}
-    for r, prof in pairs(SS2.remotes) do
-        ranked[#ranked + 1] = { r = r, prof = prof }
-    end
-    table.sort(ranked, function(a, b) return a.prof.calls > b.prof.calls end)
-    for k = 1, math.min(150, #ranked) do
-        local e = ranked[k]
-        local b = Instance.new("TextButton")
-        b.Size = UDim2.new(1, -6, 0, 20)
-        b.BackgroundColor3 = T.CARD
-        b.BackgroundTransparency = e.prof.calls > 0 and 0.35 or 1
-        b.Font = Enum.Font.Code
-        b.TextSize = 12
-        b.TextColor3 = e.prof.calls > 0 and T.TEXT or T.DIM
-        b.TextXAlignment = Enum.TextXAlignment.Left
-        b.TextTruncate = Enum.TextTruncate.AtEnd
-        b.Text = ("%4d  %-6s %s"):format(e.prof.calls, e.prof.class:sub(1, 6), e.prof.path)
-        b.LayoutOrder = k
-        local pad = Instance.new("UIPadding")
-        pad.PaddingLeft = UDim.new(0, 6)
-        pad.Parent = b
-        local rr, pp = e.r, e.prof
-        b.MouseButton1Click:Connect(function()
-            showRemoteDetail(rr, pp)
-        end)
-        b.Parent = content
-    end
-end
-
--- ═══ DECOMPILER TAB ═══
-local decompSel = nil
-
-local function renderDecompiler()
-    for _, c in ipairs(content:GetChildren()) do
-        if c:IsA("TextLabel") or c:IsA("TextButton") or c:IsA("TextBox") then c:Destroy() end
-    end
-
-    addRow("SCRIPT DECOMPILER — 3-layer (source/bytecode/constants)", T.ACCENT, 1)
-    addRow("", T.DIM, 2)
-    addRow("CONTAINER:", T.DIM, 3)
-
-    local containers = { "ReplicatedStorage", "StarterPlayer", "Players", "workspace", "StarterGui" }
-    for i, cname in ipairs(containers) do
-        local b = Instance.new("TextButton")
-        b.Size = UDim2.new(1, -6, 0, 24)
-        b.BackgroundColor3 = (decompSel == cname) and T.ACCENT or T.CARD
-        b.Font = Enum.Font.Code
-        b.TextSize = 12
-        b.TextColor3 = T.TEXT
-        b.Text = "  " .. cname
-        b.LayoutOrder = 3 + i
-        corner(b, 4)
-        b.MouseButton1Click:Connect(function()
-            decompSel = cname
-            renderDecompiler()
-        end)
-        b.Parent = content
-    end
-
-    local btnBase = 3 + #containers + 1
-
-    local function mkBtn(txt, order, cb, col)
-        local b = Instance.new("TextButton")
-        b.Size = UDim2.new(1, -6, 0, 26)
-        b.BackgroundColor3 = col or T.ACCENT
-        b.Font = Enum.Font.GothamBold
-        b.TextSize = 12
-        b.TextColor3 = Color3.new(1, 1, 1)
-        b.Text = txt
-        b.LayoutOrder = order
-        corner(b, 6)
-        b.MouseButton1Click:Connect(cb)
-        b.Parent = content
-        return b
-    end
-
-    local resultLine = addRow("selected: " .. (decompSel or "(none)"), T.YELL, btnBase)
-    mkBtn("QUICK — config/main/init scripts", btnBase + 1, function()
-        if SS2.decomp and SS2.decomp.quick then
-            SS2.decomp.quick()
-            resultLine.Text = "quick pass running — console + decomp/ folder"
-        end
-    end)
-    mkBtn("BULK DUMP — " .. (decompSel or "SELECT CONTAINER FIRST"), btnBase + 2, function()
-        if not decompSel then
-            resultLine.Text = "!! select a container first"
-            return
-        end
-        if SS2.decomp and SS2.decomp.bulk then
-            SS2.decomp.bulk(decompSel, 200)
-            resultLine.Text = "bulk dumping " .. decompSel .. " — watch console"
-        end
-    end)
-    mkBtn("SCRIPT TREE (console, top 80)", btnBase + 3, function()
-        if SS2.decomp and SS2.decomp.tree then
-            SS2.decomp.tree(decompSel or "ReplicatedStorage")
-        end
-    end, T.CARD)
-
-    addRow("", T.DIM, btnBase + 5)
-    addRow("output: SimplySpirited/decomp/ (Delta workspace)", T.DIM, btnBase + 6)
-    addRow("src.lua | .bytecode | .constants.txt — take to PC", T.DIM, btnBase + 7)
-end
-
-local renderers = { renderCalls, renderRemotes, renderDecompiler }
-
-local function switchTab(i)
-    currentTab = i
-    for j, b in ipairs(tabBtns) do
-        b.TextColor3 = (j == i) and T.ACCENT or T.DIM
-    end
-    searchBar.Visible = (i == 1)
-    renderers[i]()
-end
+local switchTab
 
 for i, name in ipairs(TABS) do
     local b = Instance.new("TextButton")
-    b.Size = UDim2.new(0, 95, 1, 0)
-    b.Position = UDim2.new(0, 8 + (i - 1) * 100, 0, 0)
+    b.Size = UDim2.new(0, 100, 1, 0)
+    b.Position = UDim2.new(0, 10 + (i - 1) * 105, 0, 0)
     b.BackgroundTransparency = 1
     b.Text = name
     b.Font = Enum.Font.GothamBold
     b.TextSize = 13
-    b.TextColor3 = (i == 1) and T.ACCENT or T.DIM
+    b.TextColor3 = (i == 1) and T.ACCENT2 or T.DIM
     b.TextXAlignment = Enum.TextXAlignment.Left
     b.Parent = tabStrip
     b.MouseButton1Click:Connect(function()
@@ -553,19 +181,443 @@ for i, name in ipairs(TABS) do
     tabBtns[i] = b
 end
 
-searchBar:GetPropertyChangedSignal("Text"):Connect(function()
+-- ═══ CONTENT LAYOUT: sidebar (200px) + main panel ═══
+local sidebar = Instance.new("ScrollingFrame")
+sidebar.Size = UDim2.new(0, 200, 1, -68)
+sidebar.Position = UDim2.new(0, 0, 0, 58)
+sidebar.BackgroundColor3 = T.SIDEBAR
+sidebar.BorderSizePixel = 0
+sidebar.ScrollBarThickness = 4
+sidebar.ScrollBarImageColor3 = T.ACCENT
+sidebar.AutomaticCanvasSize = Enum.AutomaticSize.Y
+sidebar.CanvasSize = UDim2.new(0, 0, 0, 0)
+sidebar.Parent = win
+local sbLayout = Instance.new("UIListLayout")
+sbLayout.SortOrder = Enum.SortOrder.LayoutOrder
+sbLayout.Parent = sidebar
+
+local mainPanel = Instance.new("ScrollingFrame")
+mainPanel.Size = UDim2.new(1, -216, 1, -68)
+mainPanel.Position = UDim2.new(0, 208, 0, 58)
+mainPanel.BackgroundColor3 = T.CODEBG
+mainPanel.BorderSizePixel = 0
+mainPanel.ScrollBarThickness = 5
+mainPanel.ScrollBarImageColor3 = T.ACCENT
+mainPanel.AutomaticCanvasSize = Enum.AutomaticSize.Y
+mainPanel.CanvasSize = UDim2.new(0, 0, 0, 0)
+mainPanel.Parent = win
+local mpLayout = Instance.new("UIListLayout")
+mpLayout.Padding = UDim.new(0, 2)
+mpLayout.SortOrder = Enum.SortOrder.LayoutOrder
+mpLayout.Parent = mainPanel
+
+local function clearMain()
+    for _, c in ipairs(mainPanel:GetChildren()) do
+        if c:IsA("TextLabel") or c:IsA("TextButton") or c:IsA("Frame") then c:Destroy() end
+    end
+end
+
+local function mainLine(txt, color, order, mono)
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, -12, 0, 18)
+    l.Position = UDim2.new(0, 8, 0, 0)
+    l.BackgroundTransparency = 1
+    l.Font = mono and Enum.Font.Code or Enum.Font.Gotham
+    l.TextSize = 12
+    l.TextColor3 = color or T.TEXT
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.TextWrapped = false
+    l.TextTruncate = Enum.TextTruncate.AtEnd
+    l.Text = txt
+    l.LayoutOrder = order
+    l.Parent = mainPanel
+    return l
+end
+
+local function mainBlock(txt, color, order)
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, -12, 0, 0)
+    l.AutomaticSize = Enum.AutomaticSize.Y
+    l.Position = UDim2.new(0, 8, 0, 0)
+    l.BackgroundTransparency = 1
+    l.Font = Enum.Font.Code
+    l.TextSize = 12
+    l.TextColor3 = color or T.TEXT
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.TextYAlignment = Enum.TextYAlignment.Top
+    l.TextWrapped = true
+    l.Text = txt
+    l.LayoutOrder = order
+    l.Parent = mainPanel
+    return l
+end
+
+-- ═══ BUTTON GRID (SimpleSpy style, bottom of window) ═══
+local btnGrid = Instance.new("Frame")
+btnGrid.Size = UDim2.new(1, -216, 0, 0)
+btnGrid.Position = UDim2.new(0, 208, 1, -0)
+btnGrid.BackgroundColor3 = T.PANEL
+btnGrid.BorderSizePixel = 0
+btnGrid.AutomaticSize = Enum.AutomaticSize.Y
+btnGrid.Parent = win
+local gridLayout = Instance.new("UIGridLayout")
+gridLayout.CellSize = UDim2.new(0, 140, 0, 30)
+gridLayout.CellPadding = UDim2.new(0, 8, 0, 8)
+gridLayout.SortOrder = Enum.SortOrder.LayoutOrder
+gridLayout.Parent = btnGrid
+local gridPad = Instance.new("UIPadding")
+gridPad.PaddingLeft = UDim.new(0, 8)
+gridPad.PaddingTop = UDim.new(0, 8)
+gridPad.PaddingRight = UDim.new(0, 8)
+gridPad.PaddingBottom = UDim.new(0, 8)
+gridPad.Parent = btnGrid
+
+local function gridBtn(txt, cb, col)
+    local b = Instance.new("TextButton")
+    b.BackgroundColor3 = T.CARD
+    b.Text = txt
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 12
+    b.TextColor3 = T.TEXT
+    b.AutoButtonColor = true
+    corner(b, 4)
+    stroke(b, col or T.ACCENT, 1)
+    b.MouseButton1Click:Connect(cb)
+    b.Parent = btnGrid
+    return b
+end
+
+-- ═══ SIDEBAR ROWS ═══
+local sideRows = {}
+local function sideRow(txt, color, order, recId, remoteRef, profRef)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, -8, 0, 22)
+    b.BackgroundColor3 = T.CARD
+    b.BackgroundTransparency = 0.3
+    b.Font = Enum.Font.Code
+    b.TextSize = 11
+    b.TextColor3 = color or T.TEXT
+    b.TextXAlignment = Enum.TextXAlignment.Left
+    b.TextTruncate = Enum.TextTruncate.AtEnd
+    b.Text = " " .. txt
+    b.LayoutOrder = order
+    local pad = Instance.new("UIPadding")
+    pad.PaddingLeft = UDim.new(0, 4)
+    pad.Parent = b
+    b.MouseButton1Click:Connect(function()
+        -- selection highlight
+        for _, r in ipairs(sideRows) do
+            r.BackgroundColor3 = T.CARD
+        end
+        b.BackgroundColor3 = T.ACCENT
+        if recId then
+            showCallDetail(recId)
+        elseif remoteRef and profRef then
+            showRemoteDetail(remoteRef, profRef)
+        end
+    end)
+    b.Parent = sidebar
+    sideRows[#sideRows + 1] = b
+    return b
+end
+
+local function clearSidebar()
+    for _, r in ipairs(sideRows) do
+        pcall(function() r:Destroy() end)
+    end
+    sideRows = {}
+end
+
+-- ═══ DETAIL RENDERERS (into mainPanel) ═══
+local selectedCallId = nil
+local selectedRemote = nil
+
+local function showCallDetail(recId)
+    for _, rec in ipairs(SS2.log) do
+        if rec.id == recId then
+            selectedCallId = recId
+            selectedRemote = rec.remote
+            clearMain()
+            mainLine("#" .. rec.id .. "  " .. rec.dir .. "  " .. rec.class .. "  " .. rec.name,
+                T.ACCENT2, 1, true)
+            mainLine("path: " .. rec.path, T.DIM, 2, true)
+            mainLine("", T.DIM, 3)
+            mainLine("ARGS:", T.ACCENT2, 4, true)
+            for i, a in ipairs(rec.args) do
+                mainLine("  [" .. i .. "] " .. a, T.TEXT, 4 + i, true)
+            end
+            local prof = SS2.remotes[rec.remote]
+            if prof and prof.callers and next(prof.callers) then
+                mainLine("", T.DIM, 20)
+                mainLine("CALLERS:", T.ACCENT2, 21, true)
+                local cs = {}
+                for c, n in pairs(prof.callers) do cs[#cs + 1] = { c = c, n = n } end
+                table.sort(cs, function(a, b) return a.n > b.n end)
+                for k, e in ipairs(cs) do
+                    mainLine("  " .. e.c .. " (" .. e.n .. "x)", T.DIM, 21 + k, true)
+                end
+            end
+            return
+        end
+    end
+end
+
+local function showRemoteDetail(r, prof)
+    selectedCallId = nil
+    selectedRemote = r
+    clearMain()
+    mainLine("REMOTE: " .. r.Name .. "  (" .. prof.class .. ")", T.ACCENT2, 1, true)
+    mainLine("path: " .. (prof.path or "?"), T.DIM, 2, true)
+    mainLine("calls: " .. prof.calls .. " (out " .. prof.out .. " / in " .. prof.inn .. ")", T.TEXT, 3, true)
+    mainLine("hooked: " .. tostring(prof.hooked) .. " | metaCaught: " .. tostring(prof.metaCaught or 0), T.DIM, 4, true)
+    local sigs = {}
+    for sig, cnt in pairs(prof.sigs) do
+        sigs[#sigs + 1] = { s = sig, c = cnt }
+    end
+    table.sort(sigs, function(a, b) return a.c > b.c end)
+    if #sigs > 0 then
+        mainLine("", T.DIM, 5)
+        mainLine("SIGNATURES (by frequency):", T.ACCENT2, 6, true)
+        for k = 1, math.min(25, #sigs) do
+            mainLine("  [" .. sigs[k].c .. "x] " .. sigs[k].s, T.TEXT, 6 + k, true)
+        end
+    end
+    if prof.callers and next(prof.callers) then
+        mainLine("", T.DIM, 40)
+        mainLine("CALLERS:", T.ACCENT2, 41, true)
+        local cs = {}
+        for c, n in pairs(prof.callers) do cs[#cs + 1] = { c = c, n = n } end
+        table.sort(cs, function(a, b) return a.n > b.n end)
+        for k, e in ipairs(cs) do
+            mainLine("  " .. e.c .. " (" .. e.n .. "x)", T.DIM, 41 + k, true)
+        end
+    end
+end
+
+-- ═══ TAB RENDERERS ═══
+local searchCtx = ""
+
+local function renderCalls()
+    clearSidebar()
+    local n = 0
+    for i = #SS2.log, 1, -1 do
+        local rec = SS2.log[i]
+        local hay = (rec.name .. " " .. table.concat(rec.args, " ")):lower()
+        if searchCtx == "" or hay:find(searchCtx, 1, true) then
+            n = n + 1
+            sideRow(("#%d %s %s"):format(rec.id, rec.dir, rec.name:sub(1, 20)),
+                rec.dir == "OUT" and T.GREEN or T.TEXT, n, rec.id, nil, nil)
+            if n > 100 then break end
+        end
+    end
+    -- main panel: show selected or last
+    if selectedCallId then
+        showCallDetail(selectedCallId)
+    elseif #SS2.log > 0 then
+        showCallDetail(SS2.log[#SS2.log].id)
+    else
+        clearMain()
+        mainLine("no calls yet — play the game", T.DIM, 1)
+    end
+end
+
+local function renderRemotes()
+    clearSidebar()
+    local ranked = {}
+    for r, prof in pairs(SS2.remotes) do
+        ranked[#ranked + 1] = { r = r, prof = prof }
+    end
+    table.sort(ranked, function(a, b) return a.prof.calls > b.prof.calls end)
+    for k = 1, math.min(120, #ranked) do
+        local e = ranked[k]
+        sideRow(e.prof.calls .. "x  " .. e.r.Name:sub(1, 22),
+            e.prof.calls > 0 and T.TEXT or T.DIM, k, nil, e.r, e.prof)
+    end
+    if selectedRemote then
+        showRemoteDetail(selectedRemote, SS2.remotes[selectedRemote])
+    else
+        clearMain()
+        mainLine("click a remote in the sidebar", T.DIM, 1)
+    end
+end
+
+local function renderDecompiler()
+    clearSidebar()
+    -- sidebar: containers
+    local containers = { "ReplicatedStorage", "StarterPlayer", "Players", "workspace", "StarterGui" }
+    local sel = SS2._decompContainer or "ReplicatedStorage"
+    for i, cname in ipairs(containers) do
+        local b = sideRow((sel == cname and "▸ " or "  ") .. cname,
+            sel == cname and T.ACCENT2 or T.TEXT, i)
+        b.MouseButton1Click:Connect(function()
+            SS2._decompContainer = cname
+            renderDecompiler()
+        end)
+    end
+    -- main: results
+    clearMain()
+    mainLine("DECOMPILER v4.0 — 6-layer analysis", T.ACCENT2, 1, true)
+    mainLine("caps: source=" .. tostring(SS2.decomp.caps and SS2.decomp.caps.source)
+        .. " bytecode=" .. tostring(SS2.decomp.caps and SS2.decomp.caps.bytecode), T.DIM, 2, true)
+    mainLine("", T.DIM, 3)
+    mainLine("container: " .. sel, T.TEXT, 4, true)
+    mainLine("", T.DIM, 5)
+    mainLine("use the buttons below: QUICK / BULK / TREE", T.DIM, 6, true)
+    mainLine("results -> SimplySpirited/decomp/ (workspace -> PC)", T.DIM, 7, true)
+    mainLine("", T.DIM, 8)
+    -- show cross-ref hits from last bulk if any
+    if SS2._lastXrefHits and SS2._lastXrefHits > 0 then
+        mainLine("★ last bulk found " .. SS2._lastXrefHits .. " live-wire matches!", T.GREEN, 9, true)
+    end
+end
+
+local function renderTools()
+    clearSidebar()
+    local i = 0
+    local function sGroup(txt)
+        i = i + 1
+        sideRow("── " .. txt .. " ──", T.ACCENT2, i)
+    end
+    local function sBtn(txt, cb)
+        i = i + 1
+        local b = sideRow(txt, T.TEXT, i)
+        b.MouseButton1Click:Connect(cb)
+    end
+    sGroup("CAPTURE")
+    sBtn("pause/resume capture", function() SS2.togglePause() end)
+    sBtn("verbosity: cycle", function()
+        local map = { quiet = "smart", smart = "loud", loud = "quiet" }
+        SS2.setVerbosity(map[SS2.verbosity] or "smart")
+    end)
+    sGroup("INTEL")
+    sBtn("generate API documentation", function()
+        SS2.generateAPIDoc()
+    end)
+    sBtn("master dump", function() SS2.dumpAll() end)
+    sBtn("discovery audit", function() SS2.dumpAudit() end)
+    sBtn("per-remote dossiers", function() SS2.dumpPerRemote() end)
+    sGroup("VAULT")
+    sBtn("export everything", function() SS2.exportAll() end)
+    sBtn("vault manifest", function() SS2.vaultManifest() end)
+    sGroup("STEALTH")
+    sBtn("stealth ON", function() SS2.stealthOn() end)
+    sBtn("stealth OFF", function() SS2.stealthOff() end)
+    sBtn("self-scan", function() SS2.scanSelf() end)
+    sGroup("SESSION")
+    sBtn("session summary", function() print(SS2.vaultSummary()) end)
+    clearMain()
+    mainLine("TOOLS — pick from the sidebar", T.ACCENT2, 1, true)
+    mainLine("all actions print to console", T.DIM, 2, true)
+end
+
+tabRenderers = { renderCalls, renderRemotes, renderDecompiler, renderTools }
+switchTab = function(i)
+    currentTab = i
+    for j, b in ipairs(tabBtns) do
+        b.TextColor3 = (j == i) and T.ACCENT2 or T.DIM
+    end
+    tabRenderers[i]()
+end
+
+-- ═══ BUTTON GRID WIRING (SimpleSpy verbs + ours) ═══
+gridBtn("Copy Code", function()
+    -- full arg script of selected call
+    if selectedCallId then
+        for _, rec in ipairs(SS2.log) do
+            if rec.id == selectedCallId and setclipboard then
+                setclipboard("-- " .. rec.name .. "\nlocal args = {" ..
+                    table.concat(rec.args, ",\n    ") .. "\n}\n" ..
+                    rec.class .. "(" .. rec.path .. "):FireServer(unpack(args))")
+            end
+        end
+    end
+end, T.GREEN)
+gridBtn("Copy Remote", function()
+    if selectedRemote and setclipboard then
+        setclipboard(selectedRemote:GetFullName())
+    end
+end)
+gridBtn("Run Code (replay)", function()
+    if selectedCallId and SS2.replayId then
+        SS2.replayId(selectedCallId)
+    end
+end, T.GREEN)
+gridBtn("Get Script", function()
+    -- decompile the script that owns the selected remote's caller
+    if selectedRemote then
+        local prof = SS2.remotes[selectedRemote]
+        if prof and prof.callers then
+            for caller, n in pairs(prof.callers) do
+                print("[Get Script] top caller: " .. caller .. " (" .. n .. "x)")
+                print("[Get Script] use DECOMPILER tab → bulk dump to capture it")
+                break
+            end
+        end
+    end
+end)
+gridBtn("Function Info", function()
+    if SS2.inspectLast then SS2.inspectLast() end
+end, T.PURP)
+gridBtn("Clr Logs", function()
+    SS2.log = {}
+    selectedCallId = nil
+    print("[SS2] log cleared")
+    switchTab(currentTab)
+end, T.RED)
+gridBtn("Exclude (name)", function()
+    -- mute the selected remote by name
+    if selectedRemote then
+        SS2.muteRemote(selectedRemote.Name)
+    end
+end, T.RED)
+gridBtn("Clr Mutes", function()
+    if SS2.governor then
+        SS2.governor.muted = {}
+        print("[SS2] mutes cleared")
+    end
+end)
+
+-- ═══ SEARCH ═══
+local searchBox = Instance.new("TextBox")
+searchBox.Size = UDim2.new(1, -216, 0, 24)
+searchBox.Position = UDim2.new(0, 208, 0, 32)
+searchBox.BackgroundColor3 = T.CODEBG
+searchBox.PlaceholderText = "search calls…"
+searchBox.Text = ""
+searchBox.Font = Enum.Font.Code
+searchBox.TextSize = 12
+searchBox.TextColor3 = T.TEXT
+searchBox.ClearTextOnFocus = false
+corner(searchBox, 4)
+stroke(searchBox, T.ACCENT)
+searchBox.Parent = win
+searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+    searchCtx = searchBox.Text:lower()
     if currentTab == 1 then renderCalls() end
 end)
 
+-- ═══ STATUS BAR ═══
+local stat = Instance.new("TextLabel")
+stat.Size = UDim2.new(1, -216, 0, 18)
+stat.Position = UDim2.new(0, 208, 1, -20)
+stat.BackgroundTransparency = 1
+stat.Font = Enum.Font.Code
+stat.TextSize = 11
+stat.TextColor3 = T.DIM
+stat.TextXAlignment = Enum.TextXAlignment.Left
+stat.Text = ""
+stat.Parent = win
+
 task.spawn(function()
     while gui.Parent do
-        if currentTab == 1 and searchBar.Text == "" then
-            pcall(renderCalls)
+        if currentTab == 1 and searchCtx == "" then
+            renderCalls()
         end
         local rc = 0
         for _ in pairs(SS2.remotes) do rc = rc + 1 end
-        status.Text = ("remotes: %d · calls: %d · net: %s"):format(
-            rc, #SS2.log, tostring(SS2.metaHooked))
+        stat.Text = ("remotes: %d · calls: %d · net: %s · gov: %s"):format(
+            rc, #SS2.log, tostring(SS2.metaHooked),
+            SS2.governor and SS2.governor.mode or "n/a")
         task.wait(1)
     end
 end)
@@ -573,4 +625,5 @@ end)
 switchTab(1)
 
 SS2.gui = gui
-print("[SS2-ui] v3.2 LIVE — all windows draggable, decompiler tabbed")
+SS2.uiReadyV4 = true
+print("[SS2-ui] v4.1 RED interface LIVE — SimpleSpy geometry, our engine")
