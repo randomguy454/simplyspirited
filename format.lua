@@ -1,119 +1,48 @@
 --=====================================================================
 --  PROJECT   : SimplySpy
---  FILE      : format.lua (FORMAT ENGINE) - UNIVERSAL BUILD
---  VERSION   : 0.2.0
---
---  PURPOSE   :
---    Single source of truth for value rendering. Two output modes:
---    DISPLAY (compact, readable, truncated for the UI) and CODEGEN
---    (valid, executable Lua that round-trips byte-identical).
---
---  UNIVERSALITY CONTRACT :
---    This module uses ZERO executor globals. It runs in:
---      - Any UNC executor
---      - Roblox Studio (as a ModuleScript, via the adapter at
---        the bottom of this file)
---      - Command bar
---    It uses only engine APIs: type, typeof, string, math, table,
---    Color3, CFrame, Vector3, Vector2, tostring, ipairs, pairs.
---
---  MODULE CONTRACT :
---    Required by main.lua:
---      local Format = loadModule("format")(deps)
---    Studio/command-bar use (see adapter, section 12):
---      local Format = require(script.Format) -- ModuleScript
---
---  TARGET    : universal (executors + Studio + command bar)
+--  FILE      : format.lua (FORMAT ENGINE)
+--  VERSION   : 0.3.1
+--  PURPOSE   : Value rendering and executable codegen. Zero
+--              executor globals; runs on any environment.
 --  LICENSE   : MIT
 --=====================================================================
 
------------------------------------------------------------------------
--- SECTION 1 : MODULE BOOTSTRAP
------------------------------------------------------------------------
-
 local Format = {}
-
--- Logger injection point. main.lua provides deps.log; the Studio
--- adapter provides print. Fails silent if neither exists.
 local log = function() end
-
------------------------------------------------------------------------
--- SECTION 2 : CONSTANTS (engine types only)
------------------------------------------------------------------------
 
 local DISPLAY_STRING_MAX  = 64
 local DISPLAY_TABLE_ITEMS = 16
 local DISPLAY_DEPTH_MAX   = 3
 local DISPLAY_PATH_MAX    = 96
-
 local CODEGEN_DEPTH_MAX   = 6
 local CODEGEN_TABLE_ITEMS = 256
+local SAFE_NAME = "^[%a_][%w_]*$"
 
-local SAFE_NAME_PATTERN = "^[%a_][%w_]*$"
-
--- Display colors. Declared lazily in a function because Color3 is
--- an engine type (always present) but constructing 12 of them at
--- file scope on every load is wasteful; cache on first use.
-local TYPE_COLORS = nil
-
-local TYPE_COLOR_VALUES = {
-    string   = {150, 210, 150},
-    number   = {235, 165, 95},
-    boolean  = {210, 135, 235},
-    Instance = {130, 180, 255},
-    CFrame   = {240, 220, 130},
-    Vector3  = {130, 230, 220},
-    Vector2  = {130, 230, 220},
-    Color3   = {255, 140, 140},
-    table    = {200, 200, 205},
-    userdata = {200, 170, 255},
-    nil      = {120, 120, 130},
-}
-
-local function getTypeColors()
-    if not TYPE_COLORS then
-        TYPE_COLORS = {}
-        for k, rgb in pairs(TYPE_COLOR_VALUES) do
-            TYPE_COLORS[k] = Color3.new(rgb[1]/255, rgb[2]/255, rgb[3]/255)
-        end
-    end
-    return TYPE_COLORS
-end
-
------------------------------------------------------------------------
--- SECTION 3 : NUMBER FORMATTING
------------------------------------------------------------------------
--- Precision guarantee: %.17g round-trips every finite double.
--- Integers below 2^53 print without decimal points.
+------------------------------------------------------------------
+-- NUMBERS
+------------------------------------------------------------------
 
 function Format.number(n)
-    if n ~= n then
-        return "0/0"                        -- NaN
-    elseif n == math.huge then
-        return "math.huge"
-    elseif n == -math.huge then
-        return "-math.huge"
-    elseif n == math.floor(n) and math.abs(n) < 2 ^ 53 then
+    if n ~= n then return "0/0" end
+    if n == math.huge then return "math.huge" end
+    if n == -math.huge then return "-math.huge" end
+    if n == math.floor(n) and math.abs(n) < 2 ^ 53 then
         return string.format("%d", n)
-    else
-        return string.format("%.17g", n)
     end
+    return string.format("%.17g", n)
 end
 
------------------------------------------------------------------------
--- SECTION 4 : STRING FORMATTING
------------------------------------------------------------------------
+------------------------------------------------------------------
+-- STRINGS
+------------------------------------------------------------------
 
-local CONTROL_ESCAPES = {
-    ["\n"] = "\\n",
-    ["\r"] = "\\r",
-    ["\t"] = "\\t",
-    ["\\"] = "\\\\",
-    ['"']  = '\\"',
+local ESCAPES = {
+    ["\n"] = "\\n", ["\r"] = "\\r", ["\t"] = "\\t",
+    ["\\"] = "\\\\", ['"'] = '\\"',
 }
 
 function Format.escapeString(s)
-    return (s:gsub("[%c\\\"]", CONTROL_ESCAPES))
+    return (s:gsub("[%c\\\"]", ESCAPES))
 end
 
 function Format.quoteString(s)
@@ -128,110 +57,78 @@ function Format.displayString(s)
     return Format.quoteString(s)
 end
 
------------------------------------------------------------------------
--- SECTION 5 : INSTANCE PATH RESOLUTION
------------------------------------------------------------------------
--- Display: compact "Parent.Name".
--- Codegen: "game:GetService(...)" roots with WaitForChild chains
--- for non-identifier names. Resilient to instances reparenting
--- between capture and execution.
+------------------------------------------------------------------
+-- INSTANCE PATHS
+------------------------------------------------------------------
 
-function Format.instanceDisplay(inst)
-    if not inst then
-        return "?"
-    end
-    local name = inst.Name or "?"
-    local parent = inst.Parent
-    if parent and parent.Name ~= "" and parent ~= game then
-        local combined = parent.Name .. "." .. name
-        if #combined <= DISPLAY_PATH_MAX then
-            return combined
-        end
-    end
-    return name
-end
-
--- Known service names. Workspace gets special-cased because the
--- global workspace reference is shorter and equally reliable.
-local KNOWN_SERVICES = {
+local SERVICES = {
     Players = true, ReplicatedStorage = true, ReplicatedFirst = true,
     Lighting = true, CoreGui = true, SoundService = true,
     TeleportService = true, StarterGui = true, StarterPlayer = true,
     Teams = true, Chat = true, ServerStorage = true,
     ServerScriptService = true, HttpService = true,
-    MarketplaceService = true, DataStoreService = true,
-    TweenService = true, RunService = true,
+    MarketplaceService = true, TweenService = true, RunService = true,
 }
 
-local function resolveInstanceChain(inst)
-    -- Walks to the root, returns the chain of names.
-    local names = {}
-    local current = inst
-    while current and current ~= game do
-        table.insert(names, 1, current.Name)
-        current = current.Parent
+function Format.instanceDisplay(inst)
+    if not inst then return "?" end
+    local name = inst.Name or "?"
+    local parent = inst.Parent
+    if parent and parent.Name ~= "" and parent ~= game then
+        local combined = parent.Name .. "." .. name
+        if #combined <= DISPLAY_PATH_MAX then return combined end
     end
-    return names
+    return name
 end
 
 function Format.instancePath(inst)
-    if not inst then
-        return "nil"
-    end
-    if inst == game then
-        return "game"
-    end
+    if not inst then return "nil" end
+    if inst == game then return "game" end
 
-    local names = resolveInstanceChain(inst)
-    if #names == 0 then
-        return "game"
+    local names = {}
+    local cur = inst
+    while cur and cur ~= game do
+        table.insert(names, 1, cur.Name)
+        cur = cur.Parent
     end
+    if #names == 0 then return "game" end
 
     local first = names[1]
     local path
-
     if first == "Workspace" then
         path = "workspace"
-    elseif KNOWN_SERVICES[first] then
+    elseif SERVICES[first] then
         path = 'game:GetService("' .. first .. '")'
     else
-        -- Parent chain reached a non-service root: treat the
-        -- first hop as a service lookup fallback. Workspace is
-        -- the most common parent in practice.
         path = 'game:GetService("Workspace")'
     end
 
     for i = 2, #names do
-        local name = names[i]
-        if name:match(SAFE_NAME_PATTERN) then
-            path = path .. "." .. name
+        local nm = names[i]
+        if nm:match(SAFE_NAME) then
+            path = path .. "." .. nm
         else
-            path = path .. ':WaitForChild('
-                .. Format.quoteString(name) .. ')'
+            path = path .. ':WaitForChild(' .. Format.quoteString(nm) .. ')'
         end
     end
-
     return path
 end
 
------------------------------------------------------------------------
--- SECTION 6 : DISPLAY RENDERING
------------------------------------------------------------------------
+------------------------------------------------------------------
+-- DISPLAY
+------------------------------------------------------------------
 
 function Format.display(v, depth, seen)
     depth = depth or 0
     seen = seen or {}
-
     local t = typeof(v)
 
-    if v == nil then
-        return "nil"
+    if v == nil then return "nil"
     elseif t == "Instance" then
         return v.ClassName .. " <" .. Format.instanceDisplay(v) .. ">"
     elseif t == "CFrame" then
         local p = { v:GetComponents() }
-        return string.format(
-            "CFrame(%.2f, %.2f, %.2f) [%.2f %.2f %.2f]",
+        return string.format("CFrame(%.2f, %.2f, %.2f) [%.2f %.2f %.2f]",
             p[1], p[2], p[3], p[4], p[5], p[6])
     elseif t == "Vector3" then
         return string.format("Vec3(%.2f, %.2f, %.2f)", v.X, v.Y, v.Z)
@@ -242,23 +139,14 @@ function Format.display(v, depth, seen)
             math.floor(v.R * 255 + 0.5),
             math.floor(v.G * 255 + 0.5),
             math.floor(v.B * 255 + 0.5))
-    elseif t == "number" then
-        return Format.number(v)
-    elseif t == "string" then
-        return Format.displayString(v)
-    elseif t == "boolean" then
-        return tostring(v)
-    elseif t == "EnumItem" then
-        return tostring(v)
+    elseif t == "number" then return Format.number(v)
+    elseif t == "string" then return Format.displayString(v)
+    elseif t == "boolean" then return tostring(v)
+    elseif t == "EnumItem" then return tostring(v)
     elseif t == "table" then
-        if seen[v] then
-            return "<circular>"
-        end
+        if seen[v] then return "<circular>" end
         seen[v] = true
-        if depth >= DISPLAY_DEPTH_MAX then
-            return "{...}"
-        end
-
+        if depth >= DISPLAY_DEPTH_MAX then return "{...}" end
         local parts = {}
         local count = 0
         for k, val in pairs(v) do
@@ -270,39 +158,33 @@ function Format.display(v, depth, seen)
             local key
             if type(k) == "number" then
                 key = Format.number(k)
-            elseif type(k) == "string" and k:match(SAFE_NAME_PATTERN) then
+            elseif type(k) == "string" and k:match(SAFE_NAME) then
                 key = k
             else
                 key = Format.quoteString(tostring(k))
             end
-            table.insert(parts,
-                key .. " = " .. Format.display(val, depth + 1, seen))
+            table.insert(parts, key .. " = "
+                .. Format.display(val, depth + 1, seen))
         end
         seen[v] = nil
-
-        if #parts == 0 then
-            return "{}"
-        end
+        if #parts == 0 then return "{}" end
         return "{ " .. table.concat(parts, ", ") .. " }"
     else
         return "<" .. t .. ">"
     end
 end
 
------------------------------------------------------------------------
--- SECTION 7 : CODEGEN
------------------------------------------------------------------------
+------------------------------------------------------------------
+-- CODEGEN
+------------------------------------------------------------------
 
 function Format.codegen(v, depth, seen)
     depth = depth or 0
     seen = seen or {}
-
     local t = typeof(v)
 
-    if v == nil then
-        return "nil"
-    elseif t == "Instance" then
-        return Format.instancePath(v)
+    if v == nil then return "nil"
+    elseif t == "Instance" then return Format.instancePath(v)
     elseif t == "CFrame" then
         local p = { v:GetComponents() }
         return string.format(
@@ -320,53 +202,35 @@ function Format.codegen(v, depth, seen)
     elseif t == "Color3" then
         return string.format("Color3.new(%s, %s, %s)",
             Format.number(v.R), Format.number(v.G), Format.number(v.B))
-    elseif t == "number" then
-        return Format.number(v)
-    elseif t == "string" then
-        return Format.quoteString(v)
-    elseif t == "boolean" then
-        return tostring(v)
-    elseif t == "EnumItem" then
-        return tostring(v)
+    elseif t == "number" then return Format.number(v)
+    elseif t == "string" then return Format.quoteString(v)
+    elseif t == "boolean" then return tostring(v)
+    elseif t == "EnumItem" then return tostring(v)
     elseif t == "table" then
-        if seen[v] then
-            return "{--[[circular]]}"
-        end
+        if seen[v] then return "{--[[circular]]}" end
         seen[v] = true
-        if depth >= CODEGEN_DEPTH_MAX then
-            return "{--[[depth]]}"
-        end
+        if depth >= CODEGEN_DEPTH_MAX then return "{--[[depth]]}" end
 
-        -- Detect pure array form for clean output.
+        -- Detect array form.
         local arrayLen = 0
         for i = 1, math.huge do
-            if rawget(v, i) ~= nil then
-                arrayLen = i
-            else
-                break
-            end
+            if v[i] ~= nil then arrayLen = i else break end
         end
-        local isPureArray = true
-        local seenNonArray = false
+        local pureArray = true
         for k in pairs(v) do
-            if type(k) ~= "number" then
-                isPureArray = false
-                break
-            end
+            if type(k) ~= "number" then pureArray = false break end
         end
-       
+
         local parts = {}
         local count = 0
-
-        if isPureArray and arrayLen > 0 then
+        if pureArray and arrayLen > 0 then
             for i = 1, arrayLen do
                 count = count + 1
                 if count > CODEGEN_TABLE_ITEMS then
                     table.insert(parts, "--[[truncated]]")
                     break
                 end
-                table.insert(parts,
-                    Format.codegen(v[i], depth + 1, seen))
+                table.insert(parts, Format.codegen(v[i], depth + 1, seen))
             end
         else
             for k, val in pairs(v) do
@@ -378,7 +242,7 @@ function Format.codegen(v, depth, seen)
                 local key
                 if type(k) == "number" then
                     key = "[" .. Format.number(k) .. "]"
-                elseif type(k) == "string" and k:match(SAFE_NAME_PATTERN) then
+                elseif type(k) == "string" and k:match(SAFE_NAME) then
                     key = k
                 else
                     key = "[" .. Format.quoteString(tostring(k)) .. "]"
@@ -388,119 +252,55 @@ function Format.codegen(v, depth, seen)
             end
         end
         seen[v] = nil
-
         return "{ " .. table.concat(parts, ", ") .. " }"
     else
         return "nil --[[unsupported: " .. t .. "]]"
     end
 end
 
------------------------------------------------------------------------
--- SECTION 8 : CALL SUMMARIES
------------------------------------------------------------------------
+------------------------------------------------------------------
+-- CALL SUMMARIES AND SCRIPT GENERATION
+------------------------------------------------------------------
 
 function Format.callToLine(capture)
     local remoteName = capture.remoteName or "?"
     local method = capture.method or "?"
-    local argCount = capture.argCount or 0
-    local preview
-    if capture.preview and capture.preview ~= "" then
-        preview = capture.preview
-    else
-        preview = argCount .. " args"
-    end
-    return string.format("%s:%s (%s)",
-        remoteName, method, preview)
+    local preview = (capture.preview and capture.preview ~= "")
+        and capture.preview
+        or ((capture.argCount or 0) .. " args")
+    return string.format("%s:%s (%s)", remoteName, method, preview)
 end
-
-function Format.colorFor(v)
-    local colors = getTypeColors()
-    return colors[typeof(v)] or colors.table
-end
-
------------------------------------------------------------------------
--- SECTION 9 : FULL SCRIPT GENERATION
------------------------------------------------------------------------
 
 function Format.callToScript(capture)
     local lines = {}
-
     table.insert(lines, "-- SimplySpy capture #" .. tostring(capture.id))
     table.insert(lines, "-- " .. Format.callToLine(capture))
     table.insert(lines, "")
-
     table.insert(lines, "local args = {")
     for i, arg in ipairs(capture.args) do
-        table.insert(lines, "    [" .. i .. "] = "
-            .. Format.codegen(arg) .. ",")
+        table.insert(lines, "    [" .. i .. "] = " .. Format.codegen(arg) .. ",")
     end
     table.insert(lines, "}")
     table.insert(lines, "")
-
     table.insert(lines, "local remote = " .. capture.remotePath)
-    table.insert(lines, "")
-
     if capture.method == "InvokeServer" then
         table.insert(lines, "remote:InvokeServer(unpack(args))")
     else
         table.insert(lines, "remote:FireServer(unpack(args))")
     end
-
     return table.concat(lines, "\n")
 end
-
------------------------------------------------------------------------
--- SECTION 10 : BATCH SCRIPT GENERATION
------------------------------------------------------------------------
-
-function Format.batchToScript(captures)
-    local lines = {}
-
-    table.insert(lines, "-- SimplySpy batch replay")
-    table.insert(lines, "-- " .. #captures .. " calls")
-    table.insert(lines, "")
-
-    for idx, capture in ipairs(captures) do
-        table.insert(lines, "-- call " .. idx .. ": "
-            .. Format.callToLine(capture))
-        table.insert(lines, "local args" .. idx .. " = {")
-        for i, arg in ipairs(capture.args) do
-            table.insert(lines, "    [" .. i .. "] = "
-                .. Format.codegen(arg) .. ",")
-        end
-        table.insert(lines, "}")
-        table.insert(lines, "local remote" .. idx .. " = "
-            .. capture.remotePath)
-        if capture.method == "InvokeServer" then
-            table.insert(lines, "remote" .. idx
-                .. ":InvokeServer(unpack(args" .. idx .. "))")
-        else
-            table.insert(lines, "remote" .. idx
-                .. ":FireServer(unpack(args" .. idx .. "))")
-        end
-        table.insert(lines, "")
-    end
-
-    return table.concat(lines, "\n")
-end
-
------------------------------------------------------------------------
--- SECTION 11 : MODULE EXPORT
------------------------------------------------------------------------
--- Executor path: main.lua calls loadModule("format") which
--- executes this file and expects the return to be a function
--- taking (deps) and returning the Format table.
 
 Format.limits = {
-    DISPLAY_STRING_MAX  = DISPLAY_STRING_MAX,
+    DISPLAY_STRING_MAX = DISPLAY_STRING_MAX,
     DISPLAY_TABLE_ITEMS = DISPLAY_TABLE_ITEMS,
-    DISPLAY_DEPTH_MAX   = DISPLAY_DEPTH_MAX,
-    CODEGEN_DEPTH_MAX   = CODEGEN_DEPTH_MAX,
+    DISPLAY_DEPTH_MAX = DISPLAY_DEPTH_MAX,
+    CODEGEN_DEPTH_MAX = CODEGEN_DEPTH_MAX,
     CODEGEN_TABLE_ITEMS = CODEGEN_TABLE_ITEMS,
 }
 
 return function(deps)
-    log = (deps and deps.log) or log
-    log("INFO", "format engine online (universal)")
+    if deps and deps.log then log = deps.log end
+    log("INFO", "format engine online")
     return Format
 end
