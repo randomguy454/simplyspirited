@@ -1,28 +1,10 @@
 --[[
-    simplyspirited v4.6 — decompiler engine
+    simplyspirited v4.7 — decompiler engine
     SHADOWMILESC / computerizedcarrier2
-
-    six layers:
-      L1 source read          L2 bytecode capture
-      L3 constant mining      L4 structure analysis
-      L5 live-wire cross-ref  L6 synthesized report
-
-    v4.6:
-      - lua string-literal extraction (escape-aware) from bytecode
-      - identifier mining: config-table keys from bytecode
-      - fuzzy cross-ref: scored partial matches, case-insensitive
-      - priority bulk: scripts referencing live remotes first
-      - global constant database: game vocabulary, ranked
-      - machine-readable index: decomp/index.txt
-
-    honest scope: bytecode-to-source reconstruction does not exist
-    client-side. every tool that claims it is doing extraction +
-    presentation. this is the most complete extraction pipeline
-    that fits in a client — and it is honest about that in every
-    report it writes.
+    six layers + GAME-SCOPED output folders
 ]]
 
-print("[SS2-decomp] v4.6 engine loading...")
+print("[SS2-decomp] v4.7 engine loading...")
 
 local SS2 = getgenv().SS2
 if not SS2 then
@@ -36,53 +18,54 @@ local P = Players.LocalPlayer
 SS2.decomp = {}
 SS2.decompResults = {}
 
--- ════════════════════════════════════════════════════════════
--- capability probes (dynamic — re-probe per bulk run)
--- ════════════════════════════════════════════════════════════
-local function probeCaps()
-    local c = { source = false, bytecode = false }
-    local probe = Instance.new("ModuleScript")
-    pcall(function()
-        if type(probe.Source) == "string" then c.source = true end
-    end)
-    pcall(function()
-        if getscriptbytecode and type(getscriptbytecode(probe)) == "string" then
-            c.bytecode = true
-        end
-    end)
-    probe:Destroy()
-    return c
-end
-SS2.decomp.caps = probeCaps()
+-- ═══ capability probes ═══
+local CAPS = { source = false, bytecode = false }
+local probe = Instance.new("ModuleScript")
+pcall(function()
+    if type(probe.Source) == "string" then CAPS.source = true end
+end)
+pcall(function()
+    if getscriptbytecode and type(getscriptbytecode(probe)) == "string" then
+        CAPS.bytecode = true
+    end
+end)
+probe:Destroy()
 print(("[SS2-decomp] caps: source=%s bytecode=%s"):format(
-    tostring(SS2.decomp.caps.source), tostring(SS2.decomp.caps.bytecode)))
-
--- ════════════════════════════════════════════════════════════
--- storage
--- ════════════════════════════════════════════════════════════
-SS2.decompDB = SS2.decompDB or {
-    constants = {},   -- [constant] = {count, scripts={}}
-    scripts = {},     -- [path] = result table (last analysis)
-    count = 0,
-}
-local DB = SS2.decompDB
+    tostring(CAPS.source), tostring(CAPS.bytecode)))
+SS2.decomp.caps = CAPS
 
 local function sanitizePath(full)
     return full:gsub("[^%w_]", "_"):sub(1, 130)
 end
 
+-- game-scoped folders
+local function gameFolder()
+    return SS2.gameFolder and SS2.gameFolder() or "UnknownGame"
+end
+
 local function ensureFolders()
+    local gf = gameFolder()
     pcall(function() makefolder("SimplySpirited") end)
-    pcall(function() makefolder("SimplySpirited/decomp") end)
+    pcall(function() makefolder("SimplySpirited/" .. gf) end)
+    pcall(function() makefolder("SimplySpirited/" .. gf .. "/decomp") end)
 end
 SS2.decomp.ensureFolders = ensureFolders
 
--- ════════════════════════════════════════════════════════════
--- L3a: RAW RUN EXTRACTION (readable printable runs)
--- ════════════════════════════════════════════════════════════
-local function extractRuns(bc)
-    local runs = {}
-    for s in bc:gmatch("[%w%p%s%-%_%.%:%/%\\]{4,}") do
+-- ═══ L3: CONSTANT MINER ═══
+local REMOTE_HINTS = { "Fire", "Invoke", "Remote", "Server", "Client",
+    "Buy", "Purchase", "Damage", "Coin", "Cash", "Gold", "Gem", "Money",
+    "Spawn", "Craft", "Sell", "Reward", "Points", "Token", "Shop",
+    "Trade", "Level", "XP", "Speed", "Teleport", "Weapon", "Tool" }
+local SENSITIVE = { "password", "token", "secret", "apikey", "webhook" }
+
+local function mineConstants(bytecode)
+    local M = { strings = {}, urls = {}, webhooks = {},
+        remoteHints = {}, sensitive = {}, numbers = {} }
+    if type(bytecode) ~= "string" or #bytecode == 0 then return M end
+
+    local seenS, seenU, seenR, seenX, seenN = {}, {}, {}, {}, {}
+
+    for s in bytecode:gmatch("[%w%p%s%-%_%.%:%/%\\]{4,}") do
         local readable = 0
         for i = 1, #s do
             local c = s:byte(i)
@@ -91,145 +74,56 @@ local function extractRuns(bc)
         if readable / #s > 0.9 and #s >= 4 then
             local clean = s:match("^%s*(.-)%s*$")
             if #clean >= 4 then
-                runs[#runs + 1] = clean
-            end
-        end
-    end
-    return runs
-end
-
--- ════════════════════════════════════════════════════════════
--- L3b: LUA STRING-LITERAL EXTRACTION (escape-aware)
--- bytecode stores constants contiguously; quoted literals with
--- escapes often survive as \"...\" runs — worth mining separately
--- ════════════════════════════════════════════════════════════
-local function extractStringLiterals(bc)
-    local literals = {}
-    -- \"..." escaped form
-    for s in bc:gmatch('\\"([%w%s%p%-%_%.%:%/%\\]-)\\"') do
-        if #s >= 3 and #s <= 300 then
-            literals[#literals + 1] = s
-        end
-    end
-    return literals
-end
-
--- ════════════════════════════════════════════════════════════
--- L3c: IDENTIFIER MINING (camelCase / snake_case config keys)
--- ════════════════════════════════════════════════════════════
-local function extractIdentifiers(runs)
-    local ids = {}
-    local seen = {}
-    for _, s in ipairs(runs) do
-        -- identifiers that look like config keys (not sentences)
-        if #s <= 40 and not s:find("%s") and s:match("^[%a%_][%w%_]*$") then
-            local hasLower, hasUpper = s:match("[a-z]"), s:match("[A-Z]")
-            if (hasLower and hasUpper) or s:find("_", 1, true) then
-                if not seen[s] then
-                    seen[s] = true
-                    ids[#ids + 1] = s
+                if s:match("^https?://") then
+                    if not seenU[s] then
+                        seenU[s] = true
+                        if s:find("webhook", 1, true) then
+                            M.webhooks[#M.webhooks + 1] = s
+                        else
+                            M.urls[#M.urls + 1] = s
+                        end
+                    end
+                end
+                local lower = s:lower()
+                for _, kw in ipairs(SENSITIVE) do
+                    if lower:find(kw, 1, true) and not seenX[s] then
+                        seenX[s] = true
+                        M.sensitive[#M.sensitive + 1] = s
+                        break
+                    end
+                end
+                for _, kw in ipairs(REMOTE_HINTS) do
+                    if s:find(kw, 1, true) then
+                        if not seenR[s] then
+                            seenR[s] = true
+                            M.remoteHints[#M.remoteHints + 1] = s
+                        end
+                        break
+                    end
+                end
+                if not seenS[s] then
+                    seenS[s] = true
+                    M.strings[#M.strings + 1] = s
+                    if #M.strings > 400 then return M end
                 end
             end
         end
     end
-    return ids
-end
-SS2.decomp.extractIdentifiers = extractIdentifiers
 
--- ════════════════════════════════════════════════════════════
--- L3d: CATEGORIZATION (the v4.0 logic, kept + webhooks split)
--- ════════════════════════════════════════════════════════════
-local REMOTE_HINTS = { "Fire", "Invoke", "Remote", "Server", "Client",
-    "Buy", "Purchase", "Damage", "Coin", "Cash", "Gold", "Gem", "Money",
-    "Spawn", "Craft", "Sell", "Reward", "Points", "Token", "Shop",
-    "Trade", "Level", "XP", "Speed", "Teleport", "Weapon", "Tool" }
-local SENSITIVE = { "password", "token", "secret", "apikey", "webhook" }
-
-local function categorize(runs, literals)
-    local M = { strings = {}, urls = {}, webhooks = {}, remoteHints = {},
-        sensitive = {}, identifiers = {}, numbers = {} }
-
-    local seenS, seenU, seenW, seenR, seenX, seenL = {}, {}, {}, {}, {}, {}
-
-    for _, s in ipairs(runs) do
-        if s:match("^https?://") then
-            if not seenU[s] then
-                seenU[s] = true
-                if s:find("webhook", 1, true) then
-                    M.webhooks[#M.webhooks + 1] = s
-                else
-                    M.urls[#M.urls + 1] = s
-                end
-            end
-        end
-        local lower = s:lower()
-        for _, kw in ipairs(SENSITIVE) do
-            if lower:find(kw, 1, true) and #s < 120 and not seenX[s] then
-                seenX[s] = true
-                M.sensitive[#M.sensitive + 1] = s
-                break
-            end
-        end
-        for _, kw in ipairs(REMOTE_HINTS) do
-            if s:find(kw, 1, true) then
-                if not seenR[s] then
-                    seenR[s] = true
-                    M.remoteHints[#M.remoteHints + 1] = s
-                end
-                break
-            end
-        end
-        if not seenS[s] then
-            seenS[s] = true
-            M.strings[#M.strings + 1] = s
-            if #M.strings > 400 then return M end
-        end
-    end
-
-    for _, s in ipairs(literals) do
-        if not seenL[s] then
-            seenL[s] = true
-            M.strings[#M.strings + 1] = "[lit] " .. s
+    for n in bytecode:gmatch("[%c%s](%d%d%d%d+)") do
+        local v = tonumber(n)
+        if v and not seenN[v] then
+            seenN[v] = true
+            M.numbers[#M.numbers + 1] = v
+            if #M.numbers > 60 then break end
         end
     end
 
     return M
 end
+SS2.decomp.mineConstants = mineConstants
 
--- ════════════════════════════════════════════════════════════
--- GLOBAL CONSTANT DATABASE (v4.6)
--- every constant ever mined, deduped, frequency-ranked
--- ════════════════════════════════════════════════════════════
-local function dbRecord(constants)
-    for _, s in ipairs(constants.strings or {}) do
-        local e = DB.constants[s]
-        if e then
-            e.count = e.count + 1
-        else
-            DB.constants[s] = { count = 1 }
-            DB.count = DB.count + 1
-        end
-    end
-end
-
-function SS2.decomp.topConstants(n)
-    n = n or 30
-    local sorted = {}
-    for c, e in pairs(DB.constants) do
-        sorted[#sorted + 1] = { s = c, n = e.count }
-    end
-    table.sort(sorted, function(a, b) return a.n > b.n end)
-    print("═══ game vocabulary (top " .. n .. " of " .. DB.count .. ") ═══")
-    for k = 1, math.min(n, #sorted) do
-        print(("  [%4dx] %s"):format(sorted[k].n, sorted[k].s:sub(1, 90)))
-    end
-    return sorted
-end
-SS2.decomp.topConstants = SS2.decomp.topConstants
-
--- ════════════════════════════════════════════════════════════
--- L4: STRUCTURE (kept from v4.0, + obfuscation classification)
--- ════════════════════════════════════════════════════════════
+-- ═══ L4: STRUCTURE ═══
 local function analyzeStructure(src)
     local A = { functionCount = 0, remoteRefs = {}, requires = {},
         obfuscated = false, lineCount = 0 }
@@ -265,10 +159,7 @@ local function analyzeStructure(src)
 end
 SS2.decomp.analyzeStructure = analyzeStructure
 
--- ════════════════════════════════════════════════════════════
--- L5: LIVE-WIRE CROSS-REF (v4.6: fuzzy + scored)
--- exact match = 100 pts | case-insensitive = 70 | partial = 40
--- ════════════════════════════════════════════════════════════
+-- ═══ L5: CROSS-REF (fuzzy, scored) ═══
 local function crossReference(mined, structure)
     local xref, seen = {}, {}
     local function addMatch(kind, name, score)
@@ -276,9 +167,7 @@ local function crossReference(mined, structure)
             seen[name] = true
             local prof = SS2.remotes[name]
             local calls = prof and prof.calls or 0
-            xref[#xref + 1] = {
-                kind = kind, name = name, score = score, calls = calls,
-            }
+            xref[#xref + 1] = { kind = kind, name = name, score = score, calls = calls }
         end
     end
 
@@ -309,27 +198,25 @@ local function crossReference(mined, structure)
 end
 SS2.decomp.crossReference = crossReference
 
--- ════════════════════════════════════════════════════════════
--- SINGLE-SCRIPT PIPELINE (all 6 layers)
--- ════════════════════════════════════════════════════════════
+-- ═══ SINGLE-SCRIPT PIPELINE ═══
 function SS2.decomp.script(s)
     if not s or not (s:IsA("LocalScript") or s:IsA("ModuleScript")) then
         return nil, "not a script"
     end
     ensureFolders()
+    local gf = gameFolder()
     local clean = sanitizePath(s:GetFullName())
     local report = {}
-    local result = { name = s:GetFullName(), class = s.ClassName, layers = {} }
+    local result = { name = s:GetFullName(), class = s.ClassName }
 
-    -- L1
     local ok1, src = pcall(function() return s.Source end)
     if ok1 and type(src) == "string" and #src > 0 then
         result.hasSource = true
         pcall(function()
-            writefile("SimplySpirited/decomp/" .. clean .. ".src.lua",
+            writefile("SimplySpirited/" .. gf .. "/decomp/" .. clean .. ".src.lua",
                 "-- SOURCE: " .. s:GetFullName() .. "\n" .. src)
         end)
-        report[#report + 1] = ("[L1] SOURCE: %d chars"):format(#src)
+        report[#report + 1] = ("[L1] SOURCE: %d chars captured"):format(#src)
         result.structure = analyzeStructure(src)
         report[#report + 1] = ("[L4] STRUCTURE: %d lines, %d funcs, %d refs, obfuscated=%s"):format(
             result.structure.lineCount, result.structure.functionCount,
@@ -339,23 +226,17 @@ function SS2.decomp.script(s)
         report[#report + 1] = "[L1] SOURCE: inaccessible"
     end
 
-    -- L2
     local ok2, bc = pcall(function() return getscriptbytecode(s) end)
     if ok2 and type(bc) == "string" and #bc > 0 then
         result.bytecodeLen = #bc
         pcall(function()
-            writefile("SimplySpirited/decomp/" .. clean .. ".bytecode", bc)
+            writefile("SimplySpirited/" .. gf .. "/decomp/" .. clean .. ".bytecode", bc)
         end)
-        report[#report + 1] = ("[L2] BYTECODE: %d bytes"):format(#bc)
+        report[#report + 1] = ("[L2] BYTECODE: %d bytes captured"):format(#bc)
 
-        -- L3 (v4.6: runs + literals + identifiers)
-        local runs = extractRuns(bc)
-        local literals = extractStringLiterals(bc)
-        result.mined = categorize(runs, literals)
-        result.identifiers = extractIdentifiers(runs)
-
+        result.mined = mineConstants(bc)
         local mOut = { "=== L3 CONSTANTS: " .. s:GetFullName() .. " ===" }
-        mOut[#mOut + 1] = "URLS: " .. #result.mined.urls
+        mOut[#mOut + 1] = "URLs: " .. #result.mined.urls
         for _, u in ipairs(result.mined.urls) do mOut[#mOut + 1] = "  " .. u end
         mOut[#mOut + 1] = "WEBHOOKS: " .. #result.mined.webhooks
         for _, u in ipairs(result.mined.webhooks) do mOut[#mOut + 1] = "  !! " .. u end
@@ -363,27 +244,26 @@ function SS2.decomp.script(s)
         for _, u in ipairs(result.mined.sensitive) do mOut[#mOut + 1] = "  ?? " .. u end
         mOut[#mOut + 1] = "REMOTE/API HINTS: " .. #result.mined.remoteHints
         for _, u in ipairs(result.mined.remoteHints) do mOut[#mOut + 1] = "  " .. u end
-        mOut[#mOut + 1] = "IDENTIFIERS: " .. #result.identifiers
-        for _, u in ipairs(result.identifiers) do mOut[#mOut + 1] = "  " .. u end
         mOut[#mOut + 1] = "STRINGS: " .. #result.mined.strings
         for _, u in ipairs(result.mined.strings) do mOut[#mOut + 1] = "  " .. u:sub(1, 180) end
+        local nums = {}
+        for _, n in ipairs(result.mined.numbers) do nums[#nums + 1] = tostring(n) end
+        mOut[#mOut + 1] = "NUMBERS: " .. table.concat(nums, ", ")
         pcall(function()
-            writefile("SimplySpirited/decomp/" .. clean .. ".constants.txt",
+            writefile("SimplySpirited/" .. gf .. "/decomp/" .. clean .. ".constants.txt",
                 table.concat(mOut, "\n"))
         end)
-        dbRecord(result.mined)
-        report[#report + 1] = ("[L3] CONSTANTS: %d strings, %d hints, %d identifiers, %d sensitive"):format(
-            #result.mined.strings, #result.mined.remoteHints,
-            #result.identifiers, #result.mined.sensitive)
+        report[#report + 1] = ("[L3] CONSTANTS: %d strings, %d urls, %d hints, %d sensitive"):format(
+            #result.mined.strings, #result.mined.urls,
+            #result.mined.remoteHints, #result.mined.sensitive)
     else
         report[#report + 1] = "[L2] BYTECODE: capture failed"
     end
 
-    -- L5
     if result.mined then
         result.xref = crossReference(result.mined, result.structure or {})
         if #result.xref > 0 then
-            report[#report + 1] = ("[L5] CROSS-REF: %d matches"):format(#result.xref)
+            report[#report + 1] = ("[L5] CROSS-REF: %d LIVE-WIRE MATCHES"):format(#result.xref)
             for _, x in ipairs(result.xref) do
                 report[#report + 1] = ("  ★ [%s %d] %s (%d calls seen)"):format(
                     x.kind, x.score, x.name, x.calls)
@@ -394,29 +274,32 @@ function SS2.decomp.script(s)
     local text = table.concat(report, "\n")
     result.report = text
     SS2.decompResults[s:GetFullName()] = result
-    DB.scripts[s:GetFullName()] = result
     return text, nil, result
 end
 SS2.decomp.script = SS2.decomp.script
 
--- ════════════════════════════════════════════════════════════
--- BULK (v4.6: PRIORITY-RANKED — live-wire-referencing scripts
--- get mined FIRST, manifest shows the heat map)
--- ════════════════════════════════════════════════════════════
+-- ═══ BULK ═══
 function SS2.decomp.bulk(containerName, maxScripts)
     containerName = containerName or "ReplicatedStorage"
     maxScripts = maxScripts or 200
     task.spawn(function()
         ensureFolders()
-        local caps = probeCaps()
+        local gf = gameFolder()
         local root = containerName == "Players" and P or game:GetService(containerName)
+        local nSrc, nBC, nSkip, crossHits = 0, 0, 0, 0
+        local manifest = {
+            "SIMPLYSPIRITED v4.7 DECOMP BULK",
+            "game: " .. SS2.game,
+            "container: " .. containerName .. " | date: " .. os.date(),
+            "operator: SHADOWMILESC (computerizedcarrier2)",
+            "════════════════════════════════",
+        }
 
-        -- pass 1: collect scripts + score them against live remotes
+        -- priority pre-score
         local scored = {}
         for _, d in ipairs(root:GetDescendants()) do
             if d:IsA("LocalScript") or d:IsA("ModuleScript") then
                 local score = 0
-                -- name-based pre-score: script names matching live remotes
                 for r, prof in pairs(SS2.remotes) do
                     if prof.calls > 0 and d.Name:lower():find(r.Name:lower(), 1, true) then
                         score = score + 50
@@ -427,14 +310,6 @@ function SS2.decomp.bulk(containerName, maxScripts)
         end
         table.sort(scored, function(a, b) return a.score > b.score end)
 
-        local nSrc, nBC, nSkip, crossHits = 0, 0, 0, 0
-        local manifest = {
-            "SIMPLYSPIRITED v4.6 DECOMP BULK — priority-ranked",
-            "container: " .. containerName .. " | date: " .. os.date(),
-            "operator: SHADOWMILESC (computerizedcarrier2)",
-            "════════════════════════════════",
-        }
-
         for _, e in ipairs(scored) do
             if (nSrc + nBC) >= maxScripts then break end
             local d = e.d
@@ -444,38 +319,32 @@ function SS2.decomp.bulk(containerName, maxScripts)
             local ok1, src = pcall(function() return d.Source end)
             if ok1 and type(src) == "string" and #src > 0 then
                 pcall(function()
-                    writefile("SimplySpirited/decomp/" .. clean .. ".src.lua",
+                    writefile("SimplySpirited/" .. gf .. "/decomp/" .. clean .. ".src.lua",
                         "-- SOURCE: " .. d:GetFullName() .. "\n" .. src)
                 end)
                 nSrc = nSrc + 1
                 manifest[#manifest + 1] = ("[SRC]%s %s (%dc)"):format(tag, d:GetFullName(), #src)
-                -- L4 structure even in bulk for source scripts
                 local struct = analyzeStructure(src)
                 if struct.obfuscated then
-                    manifest[#manifest + 1] = ("      !! obfuscated source detected")
+                    manifest[#manifest + 1] = "      !! obfuscated source detected"
                 end
             else
                 local ok2, bc = pcall(function() return getscriptbytecode(d) end)
                 if ok2 and type(bc) == "string" and #bc > 0 then
                     pcall(function()
-                        writefile("SimplySpirited/decomp/" .. clean .. ".bytecode", bc)
+                        writefile("SimplySpirited/" .. gf .. "/decomp/" .. clean .. ".bytecode", bc)
                     end)
-                    local runs = extractRuns(bc)
-                    local literals = extractStringLiterals(bc)
-                    local mined = categorize(runs, literals)
+                    local mined = mineConstants(bc)
                     local mOut = { "=== " .. d:GetFullName() .. " ===" }
                     for _, u in ipairs(mined.urls) do mOut[#mOut + 1] = "URL: " .. u end
                     for _, u in ipairs(mined.webhooks) do mOut[#mOut + 1] = "WEBHOOK: " .. u end
                     for _, u in ipairs(mined.sensitive) do mOut[#mOut + 1] = "SENSITIVE: " .. u end
                     for _, r in ipairs(mined.remoteHints) do mOut[#mOut + 1] = "API: " .. r end
-                    for _, id in ipairs(extractIdentifiers(runs)) do mOut[#mOut + 1] = "ID: " .. id end
                     for _, st in ipairs(mined.strings) do mOut[#mOut + 1] = "STR: " .. st:sub(1, 150) end
                     pcall(function()
-                        writefile("SimplySpirited/decomp/" .. clean .. ".constants.txt",
+                        writefile("SimplySpirited/" .. gf .. "/decomp/" .. clean .. ".constants.txt",
                             table.concat(mOut, "\n"))
                     end)
-                    dbRecord(mined)
-                    -- live-wire cross-ref
                     local xref = crossReference(mined, {})
                     for _, x in ipairs(xref) do
                         crossHits = crossHits + 1
@@ -493,32 +362,28 @@ function SS2.decomp.bulk(containerName, maxScripts)
         end
 
         manifest[#manifest + 1] = "════════════════════════════════"
-        manifest[#manifest + 1] = ("totals: %d src | %d bc | %d skipped | %d xref | %d unique constants in DB"):format(
-            nSrc, nBC, nSkip, crossHits, DB.count)
+        manifest[#manifest + 1] = ("totals: %d source | %d bytecode | %d skipped | %d cross-refs"):format(
+            nSrc, nBC, nSkip, crossHits)
 
-        -- machine-readable index (v4.6)
         local index = { "index\ttype\tname\tcalls\tscore" }
         for _, e in ipairs(scored) do
-            local okS, s = pcall(function() return #e.d.Source end)
-            index[#index + 1] = ("%s\t%s\t%s\t%d\t%d"):format(
-                e.d:GetFullName(), okS and "src" or "bc", e.d.Name, 0, e.score)
+            local okS = pcall(function() return #e.d.Source > 0 end)
+            index[#index + 1] = ("%s\t%s\t%s\t%d"):format(
+                e.d:GetFullName(), okS and "src" or "bc", e.d.Name, e.score)
         end
-        writefile("SimplySpirited/decomp/index.txt", table.concat(index, "\n"))
+        writefile("SimplySpirited/" .. gf .. "/decomp/index.txt", table.concat(index, "\n"))
 
-        writefile("SimplySpirited/decomp/_manifest.txt", table.concat(manifest, "\n"))
-        print(("[SS2-decomp] BULK DONE: %d src | %d bc | %d skip | %d XRF | DB: %d constants"):format(
-            nSrc, nBC, nSkip, crossHits, DB.count))
+        writefile("SimplySpirited/" .. gf .. "/decomp/_manifest.txt", table.concat(manifest, "\n"))
+        print(("[SS2-decomp] BULK DONE -> %s/decomp/: %d src | %d bc | %d skip | %d XRF"):format(
+            gf, nSrc, nBC, nSkip, crossHits))
         if SS2.journalAdd then
-            SS2.journalAdd("DECOMP", ("bulk %s: %d/%d/%d, %d xref"):format(
-                containerName, nSrc, nBC, nSkip, crossHits))
+            SS2.journalAdd("DECOMP", ("bulk %s: %d src, %d bc, %d xref"):format(containerName, nSrc, nBC, crossHits))
         end
     end)
 end
 SS2.decomp.bulk = SS2.decomp.bulk
 
--- ════════════════════════════════════════════════════════════
--- TREE + QUICK (kept, formatted)
--- ════════════════════════════════════════════════════════════
+-- ═══ TREE ═══
 function SS2.decomp.tree(containerName)
     containerName = containerName or "ReplicatedStorage"
     local root = containerName == "Players" and P or game:GetService(containerName)
@@ -536,6 +401,7 @@ function SS2.decomp.tree(containerName)
 end
 SS2.decomp.tree = SS2.decomp.tree
 
+-- ═══ QUICK ═══
 function SS2.decomp.quick()
     print("═══ quick: high-value targets ═══")
     local targets = {}
@@ -557,6 +423,4 @@ function SS2.decomp.quick()
 end
 SS2.decomp.quick = SS2.decomp.quick
 
-print("[SS2-decomp] v4.6 LIVE — priority bulk, fuzzy xref, constant DB")
-print("[decomp] SS2.decomp.script/bulk/tree/quick")
-print("[decomp] SS2.decomp.topConstants(30) — game vocabulary, ranked")
+print("[SS2-decomp] v4.7 LIVE — game-scoped output: SimplySpirited/<game>/decomp/")
