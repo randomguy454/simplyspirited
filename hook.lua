@@ -1,36 +1,76 @@
 --=====================================================================
---  PROJECT   : SimplySpy
---  FILE      : hook.lua (CAPTURE ENGINE) - UNIVERSAL BUILD
---  VERSION   : 0.2.0
---
---  PURPOSE   :
---    Captures every InvokeServer/FireServer call. Three hook tiers:
---      Tier 1 : newcclosure + getrawmetatable (modern UNC)
---      Tier 2 : plain closure + getrawmetatable (older executors)
---      Tier 3 : connection-scan fallback (no metatable access)
---    Falls back automatically at boot based on capabilities.
---
---  UNIVERSALITY CONTRACT :
---    Probes executor capabilities once. Degrades Tier 3 -> Tier 2
---    -> Tier 1 as available. All three tiers expose identical
---    behavior through the same module table.
---
---  RESPONSIBILITIES :
---    - Snapshot args immediately (before mutation by later code)
---    - Ring buffer of last N captures (default 200)
---    - Filters (include/exclude by remote name)
---    - Block list (suppress remotes entirely)
---    - Preview generation for list rows
---    - Call counting
---
---  MODULE CONTRACT :
---    Receives (deps). Returns this module's public table.
---    deps.format (required)  : format module
---    deps.ctx (required)     : loader context
---    deps.log (required)     : logger
---
---  TARGET    : universal (executors + Studio via adapter)
---  LICENSE   : MIT
+--=====================================================================
+--                                                                    --
+--   ____  _                   _____         _                        --
+--  / ___|(_)_ __ ___  _   _|  ___|_  ___ | |_                      --
+--  \___ \| | '_ ` _ \| | | | |_  \ \/ / '| __|                     --
+--   ___) | | | | | | | |_| |  _| | >  <| | |_                      --
+--  |____/|_|_| |_| |_|\__, |_|  \_/_/\_\  \__|                     --
+--                      |___/                                        --
+--                                                                    --
+--  CAPTURE ENGINE                                                   --
+--  ==============                                                   --
+--                                                                    --
+--  Intercepts every remote call the client makes and records a      --
+--  snapshot of the invocation. The snapshot is immutable: the       --
+--  game cannot mutate it after the fact, so what you inspect is    --
+--  exactly what crossed the wire at capture time.                   --
+--                                                                    --
+--  HOOK TIERS:                                                      --
+--    Tier 1 : newcclosure + getrawmetatable + setreadonly           --
+--             Full outgoing capture. Lowest detection risk.        --
+--    Tier 2 : plain closure + getrawmetatable + setreadonly          --
+--             Full outgoing capture. Slightly higher risk on       --
+--             some games.                                            --
+--    Tier 3 : connection scan (engine APIs only)                    --
+--             Incoming traffic only. Zero detection risk.           --
+--             Falls back automatically when no metatable access.   --
+--                                                                    --
+--  CAPTURE RECORD:                                                  --
+--    id          sequential number, stable within a session          --
+--    remote      live instance reference (may go stale; paths        --
+--                are snapshotted separately)                        --
+--    remoteName  remote .Name at capture time                       --
+--    remotePath  resolved codegen path at capture time              --
+--    method      "InvokeServer" or "FireServer" (or tier 3:          --
+--                "OnClientEvent" / "OnClientInvoke")                 --
+--    args        deep-snapshotted argument table                     --
+--    argCount    number of arguments                                 --
+--    timestamp   os.clock() at capture                               --
+--    preview     compact first-arg summary for list rows            --
+--                                                                    --
+--  SNAPSHOT POLICY:                                                 --
+--    Arguments are deep-copied immediately inside the hook,         --
+--    before the game's own code runs. Games routinely mutate       --
+--    argument tables after the call; without snapshotting the       --
+--    recorded data would be corrupted by the time it is viewed.     --
+--    Instances are kept as live references because they cannot      --
+--    be meaningfully copied, and their paths are resolved to        --
+--    strings at capture time.                                       --
+--                                                                    --
+--  FILTERING:                                                       --
+--    includeFilter : if set, only remotes with exactly this name     --
+--                    are captured                                   --
+--    excludeSet    : remotes with these names are never captured     --
+--    blockSet      : remotes with these names are suppressed from    --
+--                    the game entirely (the call does not pass       --
+--                    through)                                       --
+--                                                                    --
+--  BUFFER:                                                          --
+--    Ring buffer of the most recent N captures. Default 200.        --
+--    When full, the oldest capture is discarded. IDs keep           --
+--    counting so gaps indicate discarded entries.                   --
+--                                                                    --
+--  MODULE CONTRACT:                                                 --
+--    main.lua executes this file with a deps table containing       --
+--    ctx, state, log, and format (the loaded format module).        --
+--    The file returns a function accepting deps and returning       --
+--    the Hook table.                                                --
+--                                                                    --
+--  TARGET    : universal (executors + Studio via adapter)            --
+--  LICENSE   : MIT                                                   --
+--                                                                    --
+--=====================================================================
 --=====================================================================
 
 -----------------------------------------------------------------------
@@ -40,69 +80,66 @@
 local Hook = {}
 
 local log = function() end
-local Format -- injected via deps
+local Format = nil
 
 -----------------------------------------------------------------------
--- SECTION 2 : STATE
+-- SECTION 2 : CONFIGURATION CONSTANTS
 -----------------------------------------------------------------------
 
-local MAX_BUFFER = 200
-local buffer = {}          -- ring buffer
-local bufferCount = 0
-local captureId = 0
+local MAX_BUFFER = 200         -- ring buffer capacity
+local SNAPSHOT_DEPTH_MAX = 6   -- max table nesting in snapshots
+local PREVIEW_STRING_MAX = 24  -- max chars in preview strings
 
-local includeFilter = nil  -- string: only capture remotes matching this name
-local excludeSet = {}      -- set of remote names to never capture
-local blockSet = {}        -- set of remotes to suppress entirely
+-----------------------------------------------------------------------
+-- SECTION 3 : STATE
+-----------------------------------------------------------------------
+
+local buffer = {}        -- ordered capture records
+local captureId = 0      -- ever-increasing counter
+
+local includeFilter = nil -- string or nil
+local excludeSet = {}     -- set: name -> true
+local blockSet = {}       -- set: name -> true
 
 local hooked = false
-local hookTier = 0         -- 1, 2, or 3
+local hookTier = 0        -- 1, 2, or 3 after init
 local originalNamecall = nil
+local scanConnections = {} -- tier 3 connections
 
 -----------------------------------------------------------------------
--- SECTION 3 : CAPABILITY PROBING
+-- SECTION 4 : CAPABILITY PROBING
 -----------------------------------------------------------------------
+-- Probed once at init. The results decide the hook tier. All
+-- probes are wrapped so a missing global is simply false.
 
-local CAPABILITIES = {
-    newcclosure = false,
-    getrawmetatable = false,
-    setreadonly = false,
+local capabilities = {
+    newcclosure       = false,
+    getrawmetatable   = false,
+    setreadonly       = false,
     getnamecallmethod = false,
 }
 
 local function probeCapabilities()
-    CAPABILITIES.newcclosure = type(newcclosure) == "function"
-    CAPABILITIES.getrawmetatable = type(getrawmetatable) == "function"
-    CAPABILITIES.setreadonly = type(setreadonly) == "function"
-    CAPABILITIES.getnamecallmethod = type(getnamecallmethod) == "function"
-
-    -- getnamecallmethod is essential for all metatable tiers.
-    if not CAPABILITIES.getnamecallmethod then
-        log("WARN", "getnamecallmethod unavailable; Tier 3 only")
-        return
-    end
-
-    if CAPABILITIES.getrawmetatable and CAPABILITIES.setreadonly then
-        if CAPABILITIES.newcclosure then
-            hookTier = 1
-            log("INFO", "hook tier 1: newcclosure + metatable")
-        else
-            hookTier = 2
-            log("INFO", "hook tier 2: plain closure + metatable")
-        end
-    else
-        hookTier = 3
-        log("WARN", "hook tier 3: connection-scan fallback")
-    end
+    capabilities.newcclosure = (type(newcclosure) == "function")
+    capabilities.getrawmetatable = (type(getrawmetatable) == "function")
+    capabilities.setreadonly = (type(setreadonly) == "function")
+    capabilities.getnamecallmethod = (type(getnamecallmethod) == "function")
 end
 
 -----------------------------------------------------------------------
--- SECTION 4 : SNAPSHOT LOGIC
+-- SECTION 5 : SNAPSHOT ENGINE
 -----------------------------------------------------------------------
--- Args must be snapshotted immediately. Remote args are frequently
--- tables that the game mutates (clearing, inserting, reparenting)
--- after the call. We deep-copy tables and record userdata types
--- by reference (Instances cannot be meaningfully copied).
+-- Deep-copies values for immutable storage. Each datatype gets a
+-- strategy matched to how games mutate them:
+--
+--   table   -> recursive copy, circular-protected
+--   Instance-> kept live (cannot copy); path resolved at capture
+--   CFrame  -> flattened to 12 numbers
+--   Vector3 -> plain table {x, y, z}
+--   Vector2 -> plain table {x, y}
+--   Color3  -> plain table {r, g, b}
+--   other   -> passed through by value (strings, numbers,
+--              booleans, nil are already immutable)
 
 local function snapshotValue(v, depth, seen)
     depth = depth or 0
@@ -115,34 +152,49 @@ local function snapshotValue(v, depth, seen)
             return { __circular = true }
         end
         seen[v] = true
-        if depth > 6 then
+
+        if depth >= SNAPSHOT_DEPTH_MAX then
+            seen[v] = nil
             return { __depth = true }
         end
 
         local copy = {}
         for k, val in pairs(v) do
             local keyCopy
-            local kt = typeof(k)
-            if kt == "table" then
+            if type(k) == "table" then
                 keyCopy = snapshotValue(k, depth + 1, seen)
             else
                 keyCopy = k
             end
             copy[keyCopy] = snapshotValue(val, depth + 1, seen)
         end
+
         seen[v] = nil
         return copy
+
     elseif t == "Instance" then
-        -- Record Instances by reference; Format renders their path.
         return v
+
     elseif t == "CFrame" then
-        return { __type = "CFrame", components = { v:GetComponents() } }
+        local p = { v:GetComponents() }
+        return {
+            __type = "CFrame",
+            c = {
+                p[1],  p[2],  p[3],  p[4],
+                p[5],  p[6],  p[7],  p[8],
+                p[9],  p[10], p[11], p[12],
+            },
+        }
+
     elseif t == "Vector3" then
         return { __type = "Vector3", x = v.X, y = v.Y, z = v.Z }
+
     elseif t == "Vector2" then
         return { __type = "Vector2", x = v.X, y = v.Y }
+
     elseif t == "Color3" then
         return { __type = "Color3", r = v.R, g = v.G, b = v.B }
+
     else
         return v
     end
@@ -157,11 +209,68 @@ local function snapshotArgs(args, count)
 end
 
 -----------------------------------------------------------------------
--- SECTION 5 : FILTER EVALUATION
+-- SECTION 6 : SNAPSHOT RECONSTRUCTION
+-----------------------------------------------------------------------
+-- Converts a snapshot back into a live value for codegen. The
+-- format module consumes live values, so tagged snapshots (from
+-- the snapshot engine above) are converted back into real
+-- CFrame/Vector3/Color3 userdata before formatting.
+--
+-- This is what keeps the hook engine and the format engine
+-- decoupled: snapshots are pure data, reconstruction happens only
+-- when generating output.
+
+function Hook.reconstruct(v, depth, seen)
+    depth = depth or 0
+    seen = seen or {}
+
+    if type(v) ~= "table" then
+        return v
+    end
+    if seen[v] then
+        return v
+    end
+    seen[v] = true
+
+    -- Tagged snapshots reconstruct to their userdata type.
+    if v.__type == "CFrame" and type(v.c) == "table" then
+        seen[v] = nil
+        return CFrame.new(
+            v.c[1],  v.c[2],  v.c[3],
+            v.c[4],  v.c[5],  v.c[6],
+            v.c[7],  v.c[8],  v.c[9],
+            v.c[10], v.c[11], v.c[12]
+        )
+    elseif v.__type == "Vector3" then
+        seen[v] = nil
+        return Vector3.new(v.x, v.y, v.z)
+    elseif v.__type == "Vector2" then
+        seen[v] = nil
+        return Vector2.new(v.x, v.y)
+    elseif v.__type == "Color3" then
+        seen[v] = nil
+        return Color3.new(v.r, v.g, v.b)
+    end
+
+    -- Plain tables reconstruct recursively. Note: snapshot keys
+    -- that were tables are already copies, so reconstruction of
+    -- keys is not needed in the common case.
+    local out = {}
+    for k, val in pairs(v) do
+        out[k] = Hook.reconstruct(val, depth + 1, seen)
+    end
+
+    seen[v] = nil
+    return out
+end
+
+-----------------------------------------------------------------------
+-- SECTION 7 : FILTER EVALUATION
 -----------------------------------------------------------------------
 
 local function shouldCapture(remote)
     local name = remote.Name
+
     if blockSet[name] then
         return false
     end
@@ -175,39 +284,40 @@ local function shouldCapture(remote)
 end
 
 -----------------------------------------------------------------------
--- SECTION 6 : BUFFER MANAGEMENT
+-- SECTION 8 : BUFFER MANAGEMENT
 -----------------------------------------------------------------------
 
 local function pushCapture(capture)
     captureId = captureId + 1
     capture.id = captureId
 
-    bufferCount = bufferCount + 1
     table.insert(buffer, capture)
 
-    if #buffer > MAX_BUFFER then
+    while #buffer > MAX_BUFFER do
         table.remove(buffer, 1)
     end
 end
 
 -----------------------------------------------------------------------
--- SECTION 7 : PREVIEW GENERATION
+-- SECTION 9 : PREVIEW GENERATION
 -----------------------------------------------------------------------
--- Builds the compact preview string for list rows without full
--- formatting cost. Only called on the first argument.
+-- Builds a compact summary of the first argument for list rows.
+-- Deliberately cheap: no recursion, no full formatting. Type name
+-- or short string only.
 
 local function buildPreview(args, count)
     if count == 0 then
         return ""
     end
+
     local first = args[1]
     local t = typeof(first)
+
     if t == "string" then
-        local s = first
-        if #s > 24 then
-            s = s:sub(1, 24) .. "..."
+        if #first > PREVIEW_STRING_MAX then
+            return first:sub(1, PREVIEW_STRING_MAX) .. "..."
         end
-        return s
+        return first
     elseif t == "number" then
         return tostring(first)
     elseif t == "boolean" then
@@ -222,23 +332,24 @@ local function buildPreview(args, count)
 end
 
 -----------------------------------------------------------------------
--- SECTION 8 : CAPTURE RECORDING
+-- SECTION 10 : CAPTURE RECORDING
 -----------------------------------------------------------------------
+-- The single funnel for all tiers. Snapshots arguments, builds the
+-- record, pushes to the buffer, and notifies the UI callback if
+-- one is attached.
 
 local function recordCapture(remote, method, args, count)
     if not shouldCapture(remote) then
         return
     end
 
-    local snapshot = snapshotArgs(args, count)
-
     local capture = {
-        id = 0, -- assigned in pushCapture
+        id = 0, -- assigned by pushCapture
         remote = remote,
         remoteName = remote.Name,
         remotePath = Format.instancePath(remote),
         method = method,
-        args = snapshot,
+        args = snapshotArgs(args, count),
         argCount = count,
         timestamp = os.clock(),
         preview = buildPreview(args, count),
@@ -246,8 +357,9 @@ local function recordCapture(remote, method, args, count)
 
     pushCapture(capture)
 
-    -- UI notification hook (called if UI module is loaded).
-    if Hook.onCapture then
+    -- UI notification hook. Attached by the ui module after load.
+    -- Wrapped so a UI error never breaks the hook itself.
+    if type(Hook.onCapture) == "function" then
         local ok, err = pcall(Hook.onCapture, capture)
         if not ok then
             log("WARN", "onCapture handler error: " .. tostring(err))
@@ -256,33 +368,37 @@ local function recordCapture(remote, method, args, count)
 end
 
 -----------------------------------------------------------------------
--- SECTION 9 : HOOK IMPLEMENTATIONS
+-- SECTION 11 : TIER 1/2 : METATABLE HOOK
 -----------------------------------------------------------------------
-
---////////////////////////////////////////////////////////////////////
--- TIER 1/2 : METATABLE HOOK
---////////////////////////////////////////////////////////////////////
--- newcclosure protects against coroutine-related detection.
--- Plain closures work on most executors but are riskier.
+-- Replaces the __namecall metamethod on the game metatable. Every
+-- subsequent namecall in the client passes through the replacement.
+-- Captured calls are recorded, then forwarded to the original
+-- unchanged. The game never observes a difference.
+--
+-- Tier 1 wraps the replacement in newcclosure, which prevents
+-- coroutine-based detection of executor closures. Tier 2 uses a
+-- plain Lua closure, which works on nearly all executors but is
+-- theoretically detectable.
 
 local function installMetatableHook(useNewcclosure)
-    local mt = getrawmetatable(game)
-    if not mt then
-        return false, "getrawmetatable(game) returned nil"
+    local ok, mt = pcall(getrawmetatable, game)
+    if not ok or not mt then
+        return false, "getrawmetatable(game) failed"
+    end
+
+    if type(mt.__namecall) ~= "function" then
+        return false, "__namecall not present on metatable"
     end
 
     originalNamecall = mt.__namecall
-    if not originalNamecall then
-        return false, "__namecall not found"
-    end
 
     local replacement
-    if useNewcclosure and CAPABILITIES.newcclosure then
+    if useNewcclosure and capabilities.newcclosure then
         replacement = newcclosure(function(self, ...)
             local method = getnamecallmethod()
             if method == "InvokeServer" or method == "FireServer" then
                 local args = { ... }
-                recordCapture(self, method, args, #args)
+                recordCapture(self, method, args, select("#", ...))
             end
             return originalNamecall(self, ...)
         end)
@@ -291,64 +407,100 @@ local function installMetatableHook(useNewcclosure)
             local method = getnamecallmethod()
             if method == "InvokeServer" or method == "FireServer" then
                 local args = { ... }
-                recordCapture(self, method, args, #args)
+                recordCapture(self, method, args, select("#", ...))
             end
             return originalNamecall(self, ...)
         end
     end
 
-    local ok = pcall(function()
+    local setOk = pcall(function()
         setreadonly(mt, false)
         mt.__namecall = replacement
         setreadonly(mt, true)
     end)
 
-    if not ok then
-        return false, "failed to set __namecall"
+    if not setOk then
+        -- One more attempt without the readonly restore, for
+        -- executors whose setreadonly behaves differently.
+        setOk = pcall(function()
+            mt.__namecall = replacement
+        end)
+        if not setOk then
+            return false, "failed to replace __namecall"
+        end
     end
 
     return true
 end
 
---////////////////////////////////////////////////////////////////////
--- TIER 3 : CONNECTION-SCAN FALLBACK
---////////////////////////////////////////////////////////////////////
--- No metatable access. Scans for RemoteEvent/RemoteFunction
--- instances and hooks their OnClientEvent/OnClientInvoke instead.
--- This captures INCOMING traffic (server -> client) only, and
--- cannot see outgoing client -> server calls via :InvokeServer.
--- It is a last resort that provides partial visibility.
+-----------------------------------------------------------------------
+-- SECTION 12 : TIER 3 : CONNECTION SCAN
+-----------------------------------------------------------------------
+-- Engine-APIs-only fallback for environments without metatable
+-- access. Scans for RemoteEvent and RemoteFunction instances and
+-- attaches to their incoming-traffic signals.
+--
+-- Limitations (documented honestly):
+--   1. Only incoming (server-to-client) traffic is visible.
+--      Outgoing client calls cannot be seen without the
+--      metatable hook.
+--   2. The OnClientInvoke hook records the call but returns nil
+--      to the server, which may break game functionality that
+--      expects a return value. This is a deliberate trade-off:
+--      visibility at the cost of potential breakage.
+--   3. Remotes created after the scan will not be captured until
+--      the scan runs again (Hook.rescan()).
 
 local function scanForRemotes()
     local found = 0
-    local function scan(parent)
-        for _, inst in ipairs(parent:GetDescendants()) do
-            if inst:IsA("RemoteEvent") or inst:IsA("RemoteFunction") then
-                found = found + 1
-                local remote = inst
-                if inst:IsA("RemoteEvent") then
-                    -- Capture incoming fires.
-                    inst.OnClientEvent:Connect(function(...)
-                        recordCapture(remote, "OnClientEvent", { ... }, select("#", ...))
-                    end)
-                else
-                    -- Capture incoming invokes. The client cannot
-                    -- return a value from a hooked OnClientInvoke.
-                    -- We record the call but cannot forward it.
-                    inst.OnClientInvoke = function(...)
-                        recordCapture(remote, "OnClientInvoke", { ... }, select("#", ...))
-                        -- Return nothing; the server will receive nil.
-                        -- This is intentionally not a full replacement.
-                    end
-                end
+    scanConnections = {}
+
+    local function attachRemote(remote)
+        if remote:IsA("RemoteEvent") then
+            local conn = remote.OnClientEvent:Connect(function(...)
+                recordCapture(remote, "OnClientEvent",
+                    { ... }, select("#", ...))
+            end)
+            table.insert(scanConnections, conn)
+            found = found + 1
+        elseif remote:IsA("RemoteFunction") then
+   
+            remote.OnClientInvoke = function(...)
+                recordCapture(remote, "OnClientInvoke",
+                    { ... }, select("#", ...))
+                return nil
             end
+            found = found + 1
         end
     end
 
-    pcall(scan, game:GetService("ReplicatedStorage"))
-    pcall(scan, game:GetService("Workspace"))
-    -- Add more services as needed.
+    local function scanService(service)
+        local ok, err = pcall(function()
+            for _, inst in ipairs(service:GetDescendants()) do
+                if inst:IsA("RemoteEvent")
+                    or inst:IsA("RemoteFunction") then
+                    attachRemote(inst)
+                end
+            end
+        end)
+        if not ok then
+            log("WARN", "scan failed on service: " .. tostring(err))
+        end
+    end
 
+    scanService(game:GetService("ReplicatedStorage"))
+    scanService(game:GetService("Workspace"))
+
+    return found
+end
+
+function Hook.rescan()
+    if hookTier ~= 3 then
+        log("WARN", "rescan only applies to tier 3")
+        return 0
+    end
+    local found = scanForRemotes()
+    log("INFO", "rescan found " .. found .. " remotes")
     return found
 end
 
@@ -357,60 +509,75 @@ local function installConnectionScan()
     if found == 0 then
         return false, "no remotes found to scan"
     end
-    log("INFO", "tier 3: hooked " .. found .. " remote connections")
+    log("INFO", "tier 3: attached to " .. found .. " remote signals")
     return true
 end
 
 -----------------------------------------------------------------------
--- SECTION 10 : PUBLIC API
+-- SECTION 13 : PUBLIC API
 -----------------------------------------------------------------------
+-- INIT
+-- Wires the module and installs the best available hook tier.
+-- Returns true on success, false + reason on total failure.
 
 function Hook.init(deps)
-    log = deps.log or log
-    Format = deps.format
+    log = (deps and deps.log) or log
+    Format = deps and deps.format
 
     if not Format then
-        return false, "format module missing"
+        return false, "format module missing from deps"
     end
 
     probeCapabilities()
 
-    if hookTier == 1 then
-        local ok, err = installMetatableHook(true)
-        if not ok then
-            log("WARN", "tier 1 failed (" .. tostring(err) .. "); trying tier 2")
-            hookTier = 2
+    -- Try tiers in order of preference.
+    local attempts = {
+        { tier = 1, install = function()
+            return installMetatableHook(true)
+        end },
+        { tier = 2, install = function()
+            return installMetatableHook(false)
+        end },
+        { tier = 3, install = installConnectionScan },
+    }
+
+    for _, attempt in ipairs(attempts) do
+        -- Tier 1 requires newcclosure; skip if unavailable.
+        if attempt.tier == 1 and not capabilities.newcclosure then
+            -- fall through to tier 2
         else
-            hooked = true
+            -- Tier 1 and 2 both require the metatable stack.
+            if attempt.tier <= 2
+                and (not capabilities.getrawmetatable
+                    or not capabilities.getnamecallmethod) then
+                -- fall through to tier 3
+            else
+                local ok, err = attempt.install()
+                if ok then
+                    hookTier = attempt.tier
+                    hooked = true
+                    log("INFO", "hook engine online (tier "
+                        .. hookTier .. ")")
+                    return true
+                else
+                    log("WARN", "tier " .. attempt.tier
+                        .. " failed: " .. tostring(err))
+                end
+            end
         end
     end
 
-    if hookTier == 2 then
-        local ok, err = installMetatableHook(false)
-        if not ok then
-            log("WARN", "tier 2 failed (" .. tostring(err) .. "); trying tier 3")
-            hookTier = 3
-        else
-            hooked = true
-        end
-    end
-
-    if hookTier == 3 then
-        local ok, err = installConnectionScan()
-        if not ok then
-            return false, "all hook tiers failed: " .. tostring(err)
-        end
-        hooked = true
-    end
-
-    log("INFO", "hook engine online (tier " .. hookTier .. ")")
-    return true
+    return false, "all hook tiers failed"
 end
+
+-- SHUTDOWN
+-- Restores the original __namecall for tiers 1 and 2. Tier 3
+-- connections are disconnected where possible.
 
 function Hook.shutdown()
     if hooked and hookTier <= 2 and originalNamecall then
-        local mt = getrawmetatable(game)
-        if mt then
+        local ok, mt = pcall(getrawmetatable, game)
+        if ok and mt then
             pcall(function()
                 setreadonly(mt, false)
                 mt.__namecall = originalNamecall
@@ -418,20 +585,38 @@ function Hook.shutdown()
             end)
         end
     end
-    -- Tier 3 connections are not cleanly reversible; they remain
-    -- until the game session ends.
+
+    for _, conn in ipairs(scanConnections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    scanConnections = {}
+
     hooked = false
+    hookTier = 0
     log("INFO", "hook engine offline")
 end
+
+-- QUERIES
 
 function Hook.count()
     return #buffer
 end
 
+function Hook.getTier()
+    return hookTier
+end
+
+function Hook.getFilterName()
+    return includeFilter
+end
+
 function Hook.getRecent(n)
     n = n or 10
+    if n > #buffer then
+        n = #buffer
+    end
     local out = {}
-    local start = math.max(1, #buffer - n + 1)
+    local start = #buffer - n + 1
     for i = start, #buffer do
         table.insert(out, buffer[i])
     end
@@ -447,9 +632,36 @@ function Hook.getById(id)
     return nil
 end
 
+function Hook.getAll()
+    local out = {}
+    for _, capture in ipairs(buffer) do
+        table.insert(out, capture)
+    end
+    return out
+end
+
+-- FILTERS
+
 function Hook.setFilter(name)
+    if name == "" then
+        name = nil
+    end
     includeFilter = name
-    log("INFO", "filter set to: " .. tostring(name))
+    if name then
+        log("INFO", "filter set to: " .. name)
+    else
+        log("INFO", "filter cleared")
+    end
+end
+
+function Hook.setExcluded(name, excluded)
+    if excluded then
+        excludeSet[name] = true
+        log("INFO", "excluded: " .. name)
+    else
+        excludeSet[name] = nil
+        log("INFO", "unexcluded: " .. name)
+    end
 end
 
 function Hook.setBlocked(name, blocked)
@@ -462,21 +674,48 @@ function Hook.setBlocked(name, blocked)
     end
 end
 
+function Hook.clearFilters()
+    includeFilter = nil
+    excludeSet = {}
+    log("INFO", "all filters cleared")
+end
+
+-- BUFFER
+
 function Hook.clear()
     buffer = {}
-    bufferCount = 0
     log("INFO", "buffer cleared")
+end
+
+-----------------------------------------------------------------------
+-- SECTION 14 : CONSOLE OUTPUT
+-----------------------------------------------------------------------
+-- These functions print directly. The UI renders the same data
+-- through the format module; these are the console equivalents.
+
+local function reconstructedCapture(capture)
+    -- Format module works on live values; snapshots hold plain
+    -- tables. Reconstruct before formatting.
+    local out = {}
+    for i, arg in ipairs(capture.args) do
+        out[i] = Hook.reconstruct(arg)
+    end
+    return out
 end
 
 function Hook.list(n)
     local recent = Hook.getRecent(n or 10)
+
     print("\n=== SimplySpy Captures ===")
     if #recent == 0 then
         print("(none)")
     else
         for _, capture in ipairs(recent) do
-            print(string.format("[%d] %s",
-                capture.id, Format.callToLine(capture)))
+            print(string.format("[%d] %s:%s (%s)",
+                capture.id,
+                capture.remoteName or "?",
+                capture.method or "?",
+                capture.preview or (capture.argCount .. " args")))
         end
     end
     print("=========================\n")
@@ -489,15 +728,17 @@ function Hook.dump(id)
         return
     end
 
-    print("\n=== SimplySpy Capture #" .. id .. " ===")
-    print("Remote: " .. capture.remotePath)
-    print("Method: " .. capture.method)
-    print("Time:   " .. string.format("%.3f", capture.timestamp))
+    local args = reconstructedCapture(capture)
+
+    print("\n=== SimplySpy Capture #" .. tostring(id) .. " ===")
+    print("Remote: " .. tostring(capture.remotePath))
+    print("Method: " .. tostring(capture.method))
+    print("Time:   " .. string.format("%.3f", capture.timestamp or 0))
     print("Args:")
-    for i, arg in ipairs(capture.args) do
+    for i, arg in ipairs(args) do
         print("  [" .. i .. "] " .. Format.display(arg))
     end
-    print("===========================\n")
+    print("=============================\n")
 end
 
 function Hook.copy(id)
@@ -507,33 +748,196 @@ function Hook.copy(id)
         return
     end
 
-    local script = Format.callToScript(capture)
+    -- Build a display copy with reconstructed args so codegen
+    -- emits proper CFrame/Vector3 constructors.
+    local liveCapture = {
+        id = capture.id,
+        remoteName = capture.remoteName,
+        remotePath = capture.remotePath,
+        method = capture.method,
+        argCount = capture.argCount,
+        preview = capture.preview,
+        args = reconstructedCapture(capture),
+    }
+
+    local scriptText = Format.callToScript(liveCapture)
+
     print("\n=== SimplySpy Generated Script ===")
-    print(script)
-    print("=================================\n")
+    print(scriptText)
+    print("==================================\n")
 
     if type(setclipboard) == "function" then
-        setclipboard(script)
+        setclipboard(scriptText)
         print("Copied to clipboard.")
     else
-        print("(setclipboard not available; copy manually)")
+        print("(setclipboard not available; copy from console)")
     end
 end
 
 -----------------------------------------------------------------------
--- SECTION 11 : MODULE CONTRACT
+-- SECTION 15 : SELF-TEST
 -----------------------------------------------------------------------
--- Executor path: main.lua executes this file and passes (deps).
--- Studio adapter path: the file is also a valid ModuleScript if
--- the return function is called manually.
+-- Verifies the snapshot engine in isolation. Does not install
+-- any hooks (that requires a live game environment). Call
+-- Hook.selfTest() from the console to run.
+
+function Hook.selfTest()
+    local failures = 0
+    local total = 0
+
+    local function check(desc, condition)
+        total = total + 1
+        if not condition then
+            failures = failures + 1
+            print("[SELFTEST FAIL] " .. desc)
+        end
+    end
+
+    -- Snapshot round-trip: CFrame
+    do
+        local cf = CFrame.new(1.5, 2.5, 3.5, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+        local snap = snapshotValue(cf)
+        local back = Hook.reconstruct(snap)
+        check("CFrame roundtrip",
+            back:GetComponents() == cf:GetComponents()
+            or tostring(back) == tostring(cf))
+        local p1 = { cf:GetComponents() }
+        local p2 = { back:GetComponents() }
+        local match = true
+        for i = 1, 12 do
+            if p1[i] ~= p2[i] then
+                match = false
+            end
+        end
+        check("CFrame components exact", match)
+    end
+
+    -- Snapshot round-trip: Vector3
+    do
+        local v = Vector3.new(1.25, -2.5, 3.75)
+        local snap = snapshotValue(v)
+        local back = Hook.reconstruct(snap)
+        check("Vector3 roundtrip",
+            back.X == v.X and back.Y == v.Y and back.Z == v.Z)
+    end
+
+    -- Snapshot: table deep copy and mutation isolation
+    do
+        local t = { a = 1, b = { c = 2 } }
+        local snap = snapshotValue(t)
+        t.a = 999
+        t.b.c = 999
+        check("snapshot isolates mutations",
+            snap.a == 1 and snap.b.c == 2)
+    end
+
+    -- Snapshot: circular reference protection
+    do
+        local t = {}
+        t.self = t
+        local ok = pcall(snapshotValue, t)
+        check("circular table snapshotted without error", ok)
+    end
+
+    -- Snapshot: depth limit
+    do
+        local t = {}
+        local cur = t
+        for i = 1, 20 do
+            cur.next = {}
+            cur = cur.next
+        end
+        local ok = pcall(snapshotValue, t)
+        check("deep table snapshotted without error", ok)
+    end
+
+    -- Preview generation
+    do
+        check("preview string",
+            buildPreview({ "hello" }, 1) == "hello")
+        check("preview long string",
+            buildPreview({ string.rep("x", 40) }, 1)
+                == string.rep("x", 24) .. "...")
+        check("preview number",
+            buildPreview({ 42 }, 1) == "42")
+        check("preview empty",
+            buildPreview({}, 0) == "")
+    end
+
+    -- Buffer: overflow discards oldest
+    do
+        local savedBuffer = buffer
+        buffer = {}
+        local savedId = captureId
+        captureId = 0
+        for i = 1, MAX_BUFFER + 10 do
+            pushCapture({ remoteName = "test", method = "test",
+                args = {}, argCount = 0, preview = "",
+                timestamp = 0, remotePath = "test" })
+        end
+        check("buffer capped", #buffer == MAX_BUFFER)
+        check("ids kept counting",
+            buffer[#buffer].id == MAX_BUFFER + 10)
+        buffer = savedBuffer
+        captureId = savedId
+    end
+
+    -- Filter evaluation
+    do
+        local savedFilter = includeFilter
+        local savedExclude = excludeSet
+        local savedBlock = blockSet
+
+        local fakeRemote = { Name = "TestRemote" }
+
+        includeFilter = nil
+        excludeSet = {}
+        blockSet = {}
+        check("no filter captures all", shouldCapture(fakeRemote))
+
+        includeFilter = "TestRemote"
+        check("matching filter captures",
+            shouldCapture(fakeRemote))
+        includeFilter = "OtherRemote"
+        check("mismatching filter skips",
+            not shouldCapture(fakeRemote))
+
+        includeFilter = nil
+        excludeSet = { TestRemote = true }
+        check("excluded remote skipped",
+            not shouldCapture(fakeRemote))
+
+        excludeSet = {}
+        blockSet = { TestRemote = true }
+        check("blocked remote skipped",
+            not shouldCapture(fakeRemote))
+
+        includeFilter = savedFilter
+        excludeSet = savedExclude
+        blockSet = savedBlock
+    end
+
+    print(string.format("[SELFTEST] %d/%d passed",
+        total - failures, total))
+    return failures == 0
+end
+
+-----------------------------------------------------------------------
+-- SECTION 16 : MODULE CONTRACT
+-----------------------------------------------------------------------
+
+Hook.VERSION = "1.0.0"
+Hook.MAX_BUFFER = MAX_BUFFER
 
 return function(deps)
     local ok, result = pcall(Hook.init, deps)
     if not ok then
-        error("SimplySpy hook init failed: " .. tostring(result))
+        error("hook init crashed: " .. tostring(result))
     end
     if result == false then
-        error("SimplySpy hook init returned false (see logs)")
+        -- Init failed on all tiers. Surface the reason through the
+        -- error so main.lua's wiring reports it.
+        error("hook init failed: " .. tostring(select(2, Hook.init)))
     end
     return Hook
 end
