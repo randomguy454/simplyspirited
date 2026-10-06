@@ -1,26 +1,20 @@
 --[[
-    simplyspirited v4.6 — intel vault
+    simplyspirited v4.7 — intel vault
     SHADOWMILESC / computerizedcarrier2
 
-    the filing department. every byte of session intelligence,
-    packed, named, versioned, hashed, and self-audited.
+    GAME-SCOPED: exports land in
+      SimplySpirited/<GameName>/vault/
+    So NAT's intelligence never mixes with BABFT's.
 
     8 artifacts per export:
-      1. master intel      (everything, sectioned)
-      2. raw call log      (machine-readable)
-      3. journal           (event timeline)
-      4. session summary   (one-page brief)
-      5. presets           (portable call library)
-      6. values snapshot   (inventory/economy state)
-      7. caller attribution (call-site registry, ranked)
-      8. closure graph     (function forensics findings)
-
-    filenames versioned — exports never overwrite.
-    every artifact fingerprinted (truncation detector).
-    journal autosaves every 60s (crash-proofing).
+      1. master intel   2. raw call log   3. journal
+      4. session summary  5. presets  6. values snapshot
+      7. caller attribution  8. closure graph
+    + versioned filenames, truncation hashes, history ledger,
+      60s journal autosave, standalone manifest.
 ]]
 
-print("[SS2-vault] v4.6 loading...")
+print("[SS2-vault] v4.7 loading...")
 
 local SS2 = getgenv().SS2
 if not SS2 then
@@ -31,15 +25,21 @@ end
 local Players = game:GetService("Players")
 local P = Players.LocalPlayer
 
--- ═══ vault infrastructure ═══
+-- ═══ game-scoped paths ═══
+local function gf()
+    return SS2.gameFolder and SS2.gameFolder() or "UnknownGame"
+end
+
 local function ensureVault()
+    local folder = gf()
     pcall(function() makefolder("SimplySpirited") end)
-    pcall(function() makefolder("SimplySpirited/vault") end)
+    pcall(function() makefolder("SimplySpirited/" .. folder) end)
+    pcall(function() makefolder("SimplySpirited/" .. folder .. "/vault") end)
 end
 
 SS2.vaultHistory = SS2.vaultHistory or {}
 
--- truncation detector: length + first/last byte checksum
+-- truncation detector
 local function fingerprint(content)
     if type(content) ~= "string" then return "?" end
     local a = string.byte(content, 1) or 0
@@ -68,7 +68,7 @@ local function header(title)
     }, "\n")
 end
 
--- ═══ 1. SESSION SUMMARY ═══
+-- ═══ session summary ═══
 function SS2.vaultSummary()
     local remoteCount, totalCalls = 0, 0
     for r, prof in pairs(SS2.remotes) do
@@ -109,6 +109,7 @@ function SS2.vaultSummary()
     if SS2.closure then
         lines[#lines + 1] = ("closure autopsies:  %d"):format(SS2.closure.autopsies or 0)
     end
+    lines[#lines + 1] = ("game folder:        SimplySpirited/%s/"):format(gf())
     lines[#lines + 1] = ""
     lines[#lines + 1] = "TOP 10 REMOTES BY ACTIVITY:"
 
@@ -125,7 +126,7 @@ function SS2.vaultSummary()
 end
 SS2.vaultSummary = SS2.vaultSummary
 
--- ═══ 2. THE MASTER EXPORT — 8 ARTIFACTS ═══
+-- ═══ THE MASTER EXPORT — 8 ARTIFACTS ═══
 function SS2.vaultExportAll()
     task.spawn(function()
         ensureVault()
@@ -133,7 +134,7 @@ function SS2.vaultExportAll()
 
         local function emit(name, content)
             local ok = pcall(function()
-                writefile("SimplySpirited/vault/" .. name, content)
+                writefile("SimplySpirited/" .. gf() .. "/vault/" .. name, content)
             end)
             written[#written + 1] = {
                 name = name, ok = ok,
@@ -225,7 +226,7 @@ function SS2.vaultExportAll()
             out[#out + 1] = ("[%s] %s: %s"):format(e.t, e.tag, e.text)
         end
 
-        -- section 6: call sites (callers.lua)
+        -- section 6: call sites
         if SS2.callSites and next(SS2.callSites.sites or {}) then
             out[#out + 1] = ""
             out[#out + 1] = "══════ SECTION 6: CALL SITES ══════"
@@ -242,7 +243,7 @@ function SS2.vaultExportAll()
             end
         end
 
-        -- section 7: decomp database (decomp.lua)
+        -- section 7: mined constants DB
         if SS2.decompDB and next(SS2.decompDB.constants or {}) then
             out[#out + 1] = ""
             out[#out + 1] = ("══════ SECTION 7: MINED CONSTANTS DB (%d unique) ══════"):format(
@@ -325,8 +326,8 @@ function SS2.vaultExportAll()
             emit(stampName("callers", "txt"), table.concat(ca, "\n"))
         end
 
-        -- ── artifact 8: closure graph (closure.lua) ──
-        if SS2.closure and SS2.closure.autopsies > 0 then
+        -- ── artifact 8: closure graph ──
+        if SS2.closure and (SS2.closure.autopsies or 0) > 0 then
             local cg = {
                 "CLOSURE GRAPH — " .. os.date(),
                 ("autopsies: %d | nodes visited: %d"):format(
@@ -335,13 +336,13 @@ function SS2.vaultExportAll()
             }
             local found = 0
             for _, rec in ipairs(SS2.log) do
-                for i, raw in ipairs(rec.raw or {}) do
-                    if type(raw) == "function" then
+                for i, rawf in ipairs(rec.raw or {}) do
+                    if type(rawf) == "function" then
                         found = found + 1
                         cg[#cg + 1] = ("── call #%d %s arg[%d] ──"):format(rec.id, rec.name, i)
-                        local rep = SS2.inspectClosure and SS2.inspectClosure(raw, 0)
-                        if type(rep) == "string" then
-                            cg[#cg + 1] = rep
+                        if SS2.inspectClosure then
+                            local rep = SS2.inspectClosure(rawf, 0)
+                            if type(rep) == "string" then cg[#cg + 1] = rep end
                         end
                         if found > 100 then break end
                     end
@@ -356,7 +357,8 @@ function SS2.vaultExportAll()
         -- ── manifest with hashes ──
         local man = {
             "VAULT EXPORT MANIFEST",
-            "game: " .. SS2.game .. " | " .. os.date(),
+            "game: " .. SS2.game .. " | folder: " .. gf(),
+            "date: " .. os.date(),
             "hash: length:firstlast-byte (truncation detector)",
             "────────────────────────────────",
         }
@@ -380,6 +382,7 @@ function SS2.vaultExportAll()
         })
 
         print("[vault] EXPORT COMPLETE — " .. okCount .. "/" .. #written .. " artifacts")
+        print("[vault] folder: SimplySpirited/" .. gf() .. "/vault/")
         print("[vault] latest master: " .. masterName)
         print("[vault] SS2.vaultHistoryList() for the ledger")
     end)
@@ -387,7 +390,7 @@ end
 SS2.vaultExportAll = SS2.vaultExportAll
 SS2.exportAll = SS2.vaultExportAll
 
--- ═══ 3. EXPORT HISTORY ═══
+-- ═══ export history ═══
 function SS2.vaultHistoryList()
     print("═══ export history ═══")
     if #SS2.vaultHistory == 0 then
@@ -401,7 +404,7 @@ function SS2.vaultHistoryList()
 end
 SS2.vaultHistoryList = SS2.vaultHistoryList
 
--- ═══ 4. JOURNAL AUTOSAVE (absorbed from vault2) ═══
+-- ═══ journal autosave (60s, crash-proofing) ═══
 SS2.autosaveJournal = true
 task.spawn(function()
     while SS2.autosaveJournal do
@@ -413,19 +416,21 @@ task.spawn(function()
                 for _, e in ipairs(SS2.journal) do
                     jr[#jr + 1] = ("[%s] %s: %s"):format(e.t, e.tag, e.text)
                 end
-                writefile("SimplySpirited/vault/journal_autosave.txt",
+                writefile("SimplySpirited/" .. gf() .. "/vault/journal_autosave.txt",
                     table.concat(jr, "\n"))
             end)
         end
     end
 end)
-print("[vault] journal autosave: every 60s -> vault/journal_autosave.txt")
+print("[vault] journal autosave: every 60s")
 
--- ═══ 5. STANDALONE MANIFEST (absorbed from vault2) ═══
+-- ═══ standalone manifest (absorbed from vault2) ═══
 function SS2.vaultManifest()
     ensureVault()
+    local folder = gf()
     local lines = {
         "SIMPLYSPIRITED VAULT MANIFEST — " .. os.date(),
+        "game folder: " .. folder,
         "────────────────────────────────",
     }
     local known = {
@@ -435,7 +440,7 @@ function SS2.vaultManifest()
     }
     for _, f in ipairs(known) do
         local ok, content = pcall(function()
-            return readfile("SimplySpirited/vault/" .. f)
+            return readfile("SimplySpirited/" .. folder .. "/vault/" .. f)
         end)
         if ok and content then
             lines[#lines + 1] = ("[OK ] %-26s %9d chars"):format(f, #content)
@@ -444,19 +449,19 @@ function SS2.vaultManifest()
         end
     end
     pcall(function()
-        local files = listfiles("SimplySpirited/decomp")
+        local files = listfiles("SimplySpirited/" .. folder .. "/decomp")
         local n = 0
         for _ in ipairs(files) do n = n + 1 end
         lines[#lines + 1] = ("[DIR] decomp/                    %d files"):format(n)
     end)
-    writefile("SimplySpirited/vault/_manifest.txt", table.concat(lines, "\n"))
+    writefile("SimplySpirited/" .. folder .. "/vault/_manifest.txt", table.concat(lines, "\n"))
     print("[vault] manifest written — self-audit complete")
     return table.concat(lines, "\n")
 end
 SS2.vaultManifest = SS2.vaultManifest
 
-print("[SS2-vault] v4.6 LIVE — 8 artifacts, versioned, hashed, self-auditing")
-print("[vault] SS2.exportAll()        — full export (8 artifacts)")
+print("[SS2-vault] v4.7 LIVE — game-scoped, 8 artifacts, hashed")
+print("[vault] SS2.exportAll()        — full export")
 print("[vault] SS2.vaultSummary()     — one-page brief")
 print("[vault] SS2.vaultHistoryList() — export ledger")
 print("[vault] SS2.vaultManifest()    — standalone self-audit")
