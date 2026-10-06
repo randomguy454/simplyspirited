@@ -126,7 +126,8 @@ local TYPE_COLOR_VALUES = {
     Color3   = { 255, 140, 140 },
     table    = { 200, 200, 205 },
     userdata = { 200, 170, 255 },
-    nil      = { 120, 120, 130 },
+    ["nil"]  = { 120, 120, 130 },
+
 }
 
 local typeColors = nil
