@@ -1,22 +1,24 @@
 --[[
-    simplyspirited v4.6 — explorer
+    simplyspirited v4.7 — explorer
     SHADOWMILESC / computerizedcarrier2
 
-    game anatomy browser. navigate the DataModel, inspect
-    instances, read curated properties per class, search
-    game-wide by name.
+    dex-style anatomy browser + script harvester.
 
-    suite integration:
-    - remote instances → live capture profiles inline
-    - value instances  → one-click watch
-    - script instances → one-click decompile
+    browse the DataModel, inspect instances (remotes show
+    capture profiles, values offer watch, scripts offer
+    decompile) — and the HARVEST feature:
 
-    v4.6 fix: all property reads nil-guarded (no more
-    "concatenate string with nil" on partial classes).
-    every property is tostring'd BEFORE display.
+      select a container (game root / ReplicatedStorage /
+      Players / workspace) → detail pane shows
+      "★ HARVEST ALL SCRIPTS" → one click walks the whole
+      container, captures bytecode + source for every script,
+      writes them to SimplySpirited/harvest/, and generates
+      scripts_manifest.txt with every script name + path.
+
+    harvest is bounded (500 default) with live progress.
 ]]
 
-print("[SS2-explorer] v4.6 loading...")
+print("[SS2-explorer] v4.7 loading...")
 
 local SS2 = getgenv().SS2
 if not SS2 then
@@ -46,10 +48,12 @@ local gui = Instance.new("ScreenGui")
 gui.Name = "SS2_Explorer"
 gui.ResetOnSpawn = false
 gui.DisplayOrder = 9998
-local okP = pcall(function()
-    gui.Parent = (typeof(gethui) == "function" and gethui()) or game:GetService("CoreGui")
-end)
-if not okP then gui.Parent = P:WaitForChild("PlayerGui") end
+do
+    local ok = pcall(function()
+        gui.Parent = (typeof(gethui) == "function" and gethui()) or game:GetService("CoreGui")
+    end)
+    if not ok then gui.Parent = P:WaitForChild("PlayerGui") end
+end
 
 -- ═══ window ═══
 local win = Instance.new("Frame")
@@ -140,7 +144,7 @@ crumb.TextTruncate = Enum.TextTruncate.AtEnd
 crumb.Text = "game"
 crumb.Parent = navBar
 
--- search
+-- ═══ search ═══
 local searchBox = Instance.new("TextBox")
 searchBox.Size = UDim2.new(1, -12, 0, 16)
 searchBox.Position = UDim2.fromOffset(6, 42)
@@ -167,9 +171,11 @@ treePane.ScrollBarImageColor3 = T.DIM
 treePane.AutomaticCanvasSize = Enum.AutomaticSize.Y
 treePane.CanvasSize = UDim2.new(0, 0, 0, 0)
 treePane.Parent = win
-local tpLayout = Instance.new("UIListLayout")
-tpLayout.SortOrder = Enum.SortOrder.LayoutOrder
-tpLayout.Parent = treePane
+do
+    local l = Instance.new("UIListLayout")
+    l.SortOrder = Enum.SortOrder.LayoutOrder
+    l.Parent = treePane
+end
 
 local detailPane = Instance.new("ScrollingFrame")
 detailPane.Size = UDim2.new(1, -218, 1, -112)
@@ -181,14 +187,30 @@ detailPane.ScrollBarImageColor3 = T.DIM
 detailPane.AutomaticCanvasSize = Enum.AutomaticSize.Y
 detailPane.CanvasSize = UDim2.new(0, 0, 0, 0)
 detailPane.Parent = win
-local dpLayout = Instance.new("UIListLayout")
-dpLayout.Padding = UDim.new(0, 1)
-dpLayout.SortOrder = Enum.SortOrder.LayoutOrder
-dpLayout.Parent = detailPane
+do
+    local l = Instance.new("UIListLayout")
+    l.Padding = UDim.new(0, 1)
+    l.SortOrder = Enum.SortOrder.LayoutOrder
+    l.Parent = detailPane
+end
+
+-- ═══ status line (bottom) ═══
+local statusLine = Instance.new("TextLabel")
+statusLine.Size = UDim2.new(1, -8, 0, 14)
+statusLine.Position = UDim2.new(0, 6, 1, -18)
+statusLine.BackgroundColor3 = T.RAIL
+statusLine.BorderSizePixel = 0
+statusLine.Font = Enum.Font.Code
+statusLine.TextSize = 10
+statusLine.TextColor3 = T.DIM
+statusLine.TextXAlignment = Enum.TextXAlignment.Left
+statusLine.Text = "ready"
+statusLine.Parent = win
 
 -- ═══ navigation state ═══
 local current = game
 local history = {}
+local harvestRunning = false
 
 local function classTag(c)
     if c == "RemoteEvent" or c == "RemoteFunction" then return "[R]" end
@@ -210,10 +232,10 @@ local function clearDetail()
     end
 end
 
-local function dLine(txt, col, order, depth)
+local function dLine(txt, col, order)
     local l = Instance.new("TextLabel")
     l.Size = UDim2.new(1, -8, 0, 14)
-    l.Position = UDim2.fromOffset(5 + (depth or 0) * 10, 0)
+    l.Position = UDim2.fromOffset(5, 0)
     l.BackgroundTransparency = 1
     l.Font = Enum.Font.Code
     l.TextSize = 10
@@ -242,29 +264,21 @@ local function dAction(txt, col, order, cb)
     return b
 end
 
--- ═══ SAFE PROPERTY COLLECTOR (the v4.6 fix) ═══
--- every read pcall'd, every value tostring'd, nils dropped
--- BEFORE display — no concatenation can ever see a nil
+-- ═══ safe property collector ═══
 local function collectProps(inst)
     local props = {}
     local readers = {
-        { label = "position",  read = function() return tostring(inst.Position) end,        cls = "BasePart" },
-        { label = "size",      read = function() return tostring(inst.Size) end,           cls = "BasePart" },
-        { label = "anchored",  read = function() return tostring(inst.Anchored) end,       cls = "BasePart" },
-        { label = "material",  read = function() return tostring(inst.Material) end,       cls = "BasePart" },
-        { label = "transparency", read = function() return tostring(inst.Transparency) end, cls = "BasePart" },
-        { label = "canCollide", read = function() return tostring(inst.CanCollide) end,   cls = "BasePart" },
-        { label = "health",    read = function() return tostring(inst.Health) end,        cls = "Humanoid" },
-        { label = "maxHealth", read = function() return tostring(inst.MaxHealth) end,     cls = "Humanoid" },
-        { label = "walkSpeed", read = function() return tostring(inst.WalkSpeed) end,     cls = "Humanoid" },
-        { label = "userId",    read = function() return tostring(inst.UserId) end,        cls = "Player" },
-        { label = "team",      read = function() return tostring(inst.Team) end,          cls = "Player" },
-        { label = "meshId",    read = function() return tostring(inst.MeshId) end,        cls = "MeshPart" },
-        { label = "textureId", read = function() return tostring(inst.TextureId) end,     cls = "MeshPart" },
-        { label = "autoAssignable", read = function() return tostring(inst.AutoAssignable) end, cls = "Team" },
-        { label = "teamColor", read = function() return tostring(inst.TeamColor) end,     cls = "Team" },
-        { label = "text",      read = function() return tostring(inst.Text) end,          cls = "TextLabel" },
-        { label = "image",     read = function() return tostring(inst.Image) end,         cls = "ImageLabel" },
+        { "position",  function() return tostring(inst.Position) end,  "BasePart" },
+        { "size",      function() return tostring(inst.Size) end,      "BasePart" },
+        { "anchored",  function() return tostring(inst.Anchored) end,  "BasePart" },
+        { "material",  function() return tostring(inst.Material) end,  "BasePart" },
+        { "health",    function() return tostring(inst.Health) end,    "Humanoid" },
+        { "walkSpeed", function() return tostring(inst.WalkSpeed) end, "Humanoid" },
+        { "userId",    function() return tostring(inst.UserId) end,    "Player" },
+        { "team",      function() return tostring(inst.Team) end,      "Player" },
+        { "meshId",    function() return tostring(inst.MeshId) end,    "MeshPart" },
+        { "value",     function() return tostring(inst.Value) end,     "ValueBase" },
+        { "text",      function() return tostring(inst.Text) end,      "TextLabel" },
     }
     for _, r in ipairs(readers) do
         if inst:IsA(r.cls) then
@@ -276,6 +290,94 @@ local function collectProps(inst)
     end
     return props
 end
+
+-- ═══ HARVEST ENGINE ═══
+local function harvestScripts(containerName, maxScripts)
+    if harvestRunning then
+        print("[harvest] already running")
+        return
+    end
+    harvestRunning = true
+    containerName = containerName or "ReplicatedStorage"
+    maxScripts = maxScripts or 500
+    task.spawn(function()
+        pcall(function()
+            makefolder("SimplySpirited")
+            makefolder("SimplySpirited/harvest")
+        end)
+
+        local root = containerName == "Players" and P or game:GetService(containerName)
+        local nSrc, nBC, nFail = 0, 0, 0
+        local manifest = {
+            "SIMPLYSPIRITED SCRIPT HARVEST",
+            "container: " .. containerName .. " | date: " .. os.date(),
+            "operator: SHADOWMILESC (computerizedcarrier2)",
+            "format: [type] name | path | size",
+            "════════════════════════════════",
+        }
+
+        for _, d in ipairs(root:GetDescendants()) do
+            if (nSrc + nBC + nFail) >= maxScripts then break end
+            if d:IsA("LocalScript") or d:IsA("ModuleScript") then
+                local clean = d:GetFullName():gsub("[^%w_]", "_"):sub(1, 130)
+                local fullPath = d:GetFullName()
+                local got = false
+
+                local okS, src = pcall(function() return d.Source end)
+                if okS and type(src) == "string" and #src > 0 then
+                    pcall(function()
+                        writefile("SimplySpirited/harvest/" .. clean .. ".src.lua",
+                            "-- " .. fullPath .. "\n" .. src)
+                    end)
+                    nSrc = nSrc + 1
+                    manifest[#manifest + 1] = ("[SRC] %s | %s | %d chars"):format(
+                        d.Name, fullPath, #src)
+                    got = true
+                end
+
+                local okB, bc = pcall(function() return getscriptbytecode(d) end)
+                if okB and type(bc) == "string" and #bc > 0 then
+                    pcall(function()
+                        writefile("SimplySpirited/harvest/" .. clean .. ".bytecode", bc)
+                    end)
+                    nBC = nBC + 1
+                    if got then
+                        manifest[#manifest + 1] = ("[BC+] %s | %s | %d bytes"):format(
+                            d.Name, fullPath, #bc)
+                    else
+                        manifest[#manifest + 1] = ("[BC ] %s | %s | %d bytes"):format(
+                            d.Name, fullPath, #bc)
+                    end
+                    got = true
+                end
+
+                if not got then
+                    nFail = nFail + 1
+                    manifest[#manifest + 1] = ("[---] %s | %s | INACCESSIBLE"):format(
+                        d.Name, fullPath)
+                end
+
+                statusLine.Text = "harvest: " .. (nSrc + nBC) .. " captured, " .. nFail .. " failed"
+                task.wait()
+            end
+        end
+
+        manifest[#manifest + 1] = "════════════════════════════════"
+        manifest[#manifest + 1] = ("totals: %d source | %d bytecode | %d failed | %d total"):format(
+            nSrc, nBC, nFail, nSrc + nBC + nFail)
+
+        pcall(function()
+            writefile("SimplySpirited/harvest/scripts_manifest.txt",
+                table.concat(manifest, "\n"))
+        end)
+
+        harvestRunning = false
+        statusLine.Text = "harvest done: " .. nSrc .. " src + " .. nBC .. " bc -> harvest/"
+        print(("[harvest] DONE: %d source, %d bytecode, %d failed"):format(nSrc, nBC, nFail))
+        print("[harvest] scripts_manifest.txt lists every script name + path")
+    end)
+end
+SS2.harvestScripts = harvestScripts
 
 -- ═══ DETAIL VIEW ═══
 local function showDetail(inst)
@@ -291,23 +393,38 @@ local function showDetail(inst)
     n = n + 1
     dLine("class: " .. inst.ClassName, T.RED, n + 1)
     n = n + 1
-    local okPar, parName = pcall(function() return inst.Parent.Name end)
+
+    local okPar, parName = pcall(function() return inst.Parent and inst.Parent.Name end)
     if okPar and parName then
         dLine("parent: " .. parName, T.DIM, n + 1)
         n = n + 1
     end
 
-    -- suite integration: remote capture profile
+    -- HARVEST: containers offer full script extraction
+    local isHarvestable = (inst == game) or inst:IsA("ReplicatedStorage")
+        or inst:IsA("Players") or inst:IsA("StarterPlayer") or inst == workspace
+    if isHarvestable then
+        dAction("★ HARVEST ALL SCRIPTS (bytecode + names)", T.RED, n + 1, function()
+            local cName = "ReplicatedStorage"
+            if inst == workspace then cName = "workspace"
+            elseif inst:IsA("Players") then cName = "Players"
+            elseif inst:IsA("StarterPlayer") then cName = "StarterPlayer" end
+            harvestScripts(cName, 500)
+        end)
+        n = n + 1
+    end
+
+    -- remote capture profile
     if inst:IsA("RemoteEvent") or inst:IsA("RemoteFunction") then
         local prof = SS2.remotes[inst]
         if prof then
             n = n + 1
-            dLine("── capture profile ──", T.DIM, n + 1)
+            dLine("── capture profile ──", T.DIM, n)
             n = n + 1
-            dLine("calls: " .. prof.calls .. " (out " .. prof.out .. " / in " .. prof.inn .. ")", T.TEXT, n + 1)
+            dLine("calls: " .. prof.calls .. " (out " .. prof.out .. " / in " .. prof.inn .. ")", T.TEXT, n)
             n = n + 1
             if (prof.metaCaught or 0) > 0 then
-                dLine("net-caught: " .. prof.metaCaught, T.DIM, n + 1)
+                dLine("net-caught: " .. prof.metaCaught, T.DIM, n)
                 n = n + 1
             end
             local sigs = {}
@@ -316,20 +433,22 @@ local function showDetail(inst)
             end
             table.sort(sigs, function(a, b) return a.c > b.c end)
             for k = 1, math.min(5, #sigs) do
-                dLine("  sig[" .. sigs[k].c .. "x] " .. tostring(sigs[k].s):sub(1, 60), T.DIM, n + 1)
+                dLine("  sig[" .. sigs[k].c .. "x] " .. tostring(sigs[k].s):sub(1, 60), T.DIM, n)
                 n = n + 1
             end
-            dAction("full profile (console)", T.TEXT, n + 1, function()
-                if SS2.profileRemote then SS2.profileRemote(inst.Name) end
-            end)
-            n = n + 1
+            if SS2.profileRemote then
+                dAction("full profile (console)", T.TEXT, n + 1, function()
+                    SS2.profileRemote(inst.Name)
+                end)
+                n = n + 1
+            end
         else
             dLine("(not captured yet — profiles on first fire)", T.DIM, n + 1)
             n = n + 1
         end
     end
 
-    -- value integration
+    -- value
     if inst:IsA("ValueBase") then
         local okV, val = pcall(function() return inst.Value end)
         if okV then
@@ -344,7 +463,7 @@ local function showDetail(inst)
         end
     end
 
-    -- script integration
+    -- script
     if inst:IsA("LocalScript") or inst:IsA("ModuleScript") then
         local okS, src = pcall(function() return inst.Source end)
         if okS and type(src) == "string" and #src > 0 then
@@ -362,18 +481,18 @@ local function showDetail(inst)
         end
     end
 
-    -- safe class-specific properties
+    -- safe properties
     local props = collectProps(inst)
     if #props > 0 then
         dLine("── properties ──", T.DIM, n + 1)
         n = n + 1
         for _, p in ipairs(props) do
-            dLine("  " .. p.label .. " = " .. p.value, T.TEXT, n + 1)
+            dLine("  " .. p.label .. " = " .. tostring(p.value), T.TEXT, n)
             n = n + 1
         end
     end
 
-    -- descendant census
+    -- descendants
     local okC, census, total = pcall(function()
         local counts, tot = {}, 0
         for _, d in ipairs(inst:GetDescendants()) do
@@ -391,12 +510,11 @@ local function showDetail(inst)
         end
         table.sort(sorted, function(a, b) return a.n > b.n end)
         for k = 1, math.min(8, #sorted) do
-            dLine("  " .. sorted[k].cls .. ": " .. sorted[k].n, T.DIM, n + 1)
+            dLine("  " .. sorted[k].cls .. ": " .. sorted[k].n, T.DIM, n)
             n = n + 1
         end
     end
 
-    -- actions
     dAction("copy full path", T.TEXT, n + 2, function()
         if setclipboard then setclipboard(inst:GetFullName()) end
     end)
@@ -407,7 +525,7 @@ local function showDetail(inst)
     end
 end
 
--- ═══ TREE VIEW ═══
+-- ═══ TREE ═══
 local function renderTree()
     clearTree()
     local ok, children = pcall(function() return current:GetChildren() end)
@@ -521,18 +639,7 @@ searchBox:GetPropertyChangedSignal("Text"):Connect(function()
                     showDetail(inst)
                 end)
                 b.Parent = treePane
-                if n >= 80 then
-                    local l = Instance.new("TextLabel")
-                    l.Size = UDim2.new(1, -6, 0, 16)
-                    l.BackgroundTransparency = 1
-                    l.Font = Enum.Font.Code
-                    l.TextSize = 10
-                    l.TextColor3 = T.DIM
-                    l.TextXAlignment = Enum.TextXAlignment.Left
-                    l.Text = "… (80 shown — refine search)"
-                    l.Parent = treePane
-                    break
-                end
+                if n >= 80 then break end
             end
         end
         if n == 0 then
@@ -557,6 +664,7 @@ showDetail(game)
 
 SS2.explorer = {
     window = gui,
+    harvest = harvestScripts,
     navigate = function(inst)
         table.insert(history, current)
         current = inst
@@ -566,4 +674,4 @@ SS2.explorer = {
     end,
 }
 
-print("[SS2-explorer] v4.6 LIVE — nil-safe, suite-aware")
+print("[SS2-explorer] v4.7 LIVE — browser + nil-safe details + bytecode harvester")
