@@ -1,12 +1,15 @@
 -- ════════════════════════════════════════════════════════════
---  SIMPLYSPIRITED v3.1 — UI
---  Two tabs. Click anything. Know name/path/args.
---  LIVE CALLS: every call, newest first, searchable
---  REMOTES: ranked list, click for full dossier
---  Requires core.lua.
+--  SIMPLYSPIRITED v3.2 — UI (FIXED)
+--  For SHADOWMILESC (computerizedcarrier2)
+--  ────────────────────────────────────────────────────────────
+--  • ALL windows draggable (main + detail card by its header)
+--  • Tabs: LIVE CALLS / REMOTES / DECOMPILER
+--  • Click-to-expand calls with action buttons
+--  • Decompiler tabbed: container picker, bulk, quick, tree
+--  Requires core.lua. Engine functions from callers/watch.
 -- ════════════════════════════════════════════════════════════
 
-print("[SS2-ui] building interface...")
+print("[SS2-ui] building interface v3.2...")
 
 local SS2 = getgenv().SS2
 if not SS2 then warn("[SS2-ui] core must load first") return end
@@ -15,7 +18,6 @@ local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local P = Players.LocalPlayer
 
--- teardown previous UI generations
 pcall(function()
     local root = (typeof(gethui) == "function" and gethui()) or game:GetService("CoreGui")
     for _, n in ipairs({ "SS2_Interface", "SS2_Notify" }) do
@@ -60,7 +62,7 @@ if not okP then gui.Parent = P:WaitForChild("PlayerGui") end
 
 -- ═══ MAIN WINDOW ═══
 local win = Instance.new("Frame")
-win.Size = UDim2.new(0, 480, 0, 380)
+win.Size = UDim2.new(0, 500, 0, 380)
 win.Position = UDim2.new(0, 30, 0, 50)
 win.BackgroundColor3 = T.BG
 win.BorderSizePixel = 0
@@ -86,7 +88,7 @@ local hTitle = Instance.new("TextLabel")
 hTitle.Size = UDim2.new(0, 320, 1, 0)
 hTitle.Position = UDim2.new(0, 12, 0, 0)
 hTitle.BackgroundTransparency = 1
-hTitle.Text = "SIMPLYSPIRITED — " .. SS2.game:sub(1, 18)
+hTitle.Text = "SIMPLYSPIRITED v3.2 — " .. SS2.game:sub(1, 18)
 hTitle.Font = Enum.Font.GothamBold
 hTitle.TextSize = 14
 hTitle.TextColor3 = T.TEXT
@@ -104,34 +106,41 @@ closeBtn.TextColor3 = Color3.new(1, 1, 1)
 corner(closeBtn, 6)
 closeBtn.Parent = header
 
--- drag
-local dragging, dStart, dPos = false, nil, nil
-header.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-    or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = true
-        dStart = input.Position
-        dPos = win.Position
-    end
-end)
-UIS.InputChanged:Connect(function(input)
-    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
-    or input.UserInputType == Enum.UserInputType.Touch) then
-        local d = input.Position - dStart
-        win.Position = UDim2.new(dPos.X.Scale, dPos.X.Offset + d.X,
-            dPos.Y.Scale, dPos.Y.Offset + d.Y)
-    end
-end)
-UIS.InputEnded:Connect(function()
-    dragging = false
-end)
+-- ═══ UNIVERSAL DRAG MAKER (v3.2: all windows draggable) ═══
+local function makeDraggable(handle, target)
+    local dragging, dStart, dPos = false, nil, nil
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dStart = input.Position
+            dPos = target.Position
+        end
+    end)
+    UIS.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch) then
+            local d = input.Position - dStart
+            target.Position = UDim2.new(dPos.X.Scale, dPos.X.Offset + d.X,
+                dPos.Y.Scale, dPos.Y.Offset + d.Y)
+        end
+    end)
+    UIS.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
+makeDraggable(header, win)
+
 closeBtn.MouseButton1Click:Connect(function()
     gui:Destroy()
     print("[SS2-ui] closed — engine remains")
 end)
 
 -- ═══ TABS ═══
-local TABS = { "LIVE CALLS", "REMOTES" }
+local TABS = { "LIVE CALLS", "REMOTES", "DECOMPILER" }
 local tabStrip = Instance.new("Frame")
 tabStrip.Size = UDim2.new(1, 0, 0, 28)
 tabStrip.Position = UDim2.new(0, 0, 0, 30)
@@ -142,7 +151,6 @@ tabStrip.Parent = win
 local tabBtns = {}
 local currentTab = 1
 
--- search bar (LIVE CALLS only)
 local searchBar = Instance.new("TextBox")
 searchBar.Size = UDim2.new(1, -16, 0, 24)
 searchBar.Position = UDim2.new(0, 8, 0, 62)
@@ -182,10 +190,10 @@ status.TextXAlignment = Enum.TextXAlignment.Left
 status.Text = ""
 status.Parent = win
 
--- ═══ DETAIL CARD ═══
+-- ═══ DETAIL CARD (draggable by its header) ═══
 local card = Instance.new("Frame")
 card.Size = UDim2.new(0, 360, 0, 250)
-card.Position = UDim2.new(0, 520, 0, 50)
+card.Position = UDim2.new(0, 540, 0, 50)
 card.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
 card.BorderSizePixel = 0
 card.Visible = false
@@ -194,29 +202,43 @@ card.Parent = gui
 corner(card, 10)
 stroke(card, T.ACCENT, 1.5)
 
+local cardHeader = Instance.new("Frame")
+cardHeader.Size = UDim2.new(1, 0, 0, 28)
+cardHeader.BackgroundColor3 = T.PANEL
+cardHeader.BorderSizePixel = 0
+cardHeader.Parent = card
+local chFill = Instance.new("Frame")
+chFill.Size = UDim2.new(1, 0, 0, 10)
+chFill.Position = UDim2.new(0, 0, 1, -10)
+chFill.BackgroundColor3 = T.PANEL
+chFill.BorderSizePixel = 0
+chFill.Parent = cardHeader
+
 local cTitle = Instance.new("TextLabel")
-cTitle.Size = UDim2.new(1, -60, 0, 24)
-cTitle.Position = UDim2.new(0, 10, 0, 6)
+cTitle.Size = UDim2.new(1, -60, 1, 0)
+cTitle.Position = UDim2.new(0, 10, 0, 0)
 cTitle.BackgroundTransparency = 1
 cTitle.Font = Enum.Font.GothamBold
-cTitle.TextSize = 13
+cTitle.TextSize = 12
 cTitle.TextColor3 = T.ACCENT
 cTitle.TextXAlignment = Enum.TextXAlignment.Left
 cTitle.Text = ""
-cTitle.Parent = card
+cTitle.Parent = cardHeader
 
 local cClose = Instance.new("TextButton")
 cClose.Size = UDim2.new(0, 24, 0, 22)
-cClose.Position = UDim2.new(1, -30, 0, 5)
+cClose.Position = UDim2.new(1, -30, 0, 3)
 cClose.BackgroundColor3 = T.RED
 cClose.Text = "X"
 cClose.Font = Enum.Font.GothamBold
 cClose.TextSize = 12
 cClose.TextColor3 = Color3.new(1, 1, 1)
-cClose.Parent = card
+cClose.Parent = cardHeader
+
+makeDraggable(cardHeader, card)
 
 local cScroll = Instance.new("ScrollingFrame")
-cScroll.Size = UDim2.new(1, -16, 1, -94)
+cScroll.Size = UDim2.new(1, -16, 1, -66)
 cScroll.Position = UDim2.new(0, 8, 0, 32)
 cScroll.BackgroundTransparency = 1
 cScroll.BorderSizePixel = 0
@@ -242,8 +264,8 @@ cBody.Text = ""
 cBody.Parent = cScroll
 
 local cBtnRow = Instance.new("Frame")
-cBtnRow.Size = UDim2.new(1, -16, 0, 30)
-cBtnRow.Position = UDim2.new(0, 8, 1, -38)
+cBtnRow.Size = UDim2.new(1, -16, 0, 28)
+cBtnRow.Position = UDim2.new(0, 8, 1, -34)
 cBtnRow.BackgroundTransparency = 1
 cBtnRow.Parent = card
 local cBtnLayout = Instance.new("UIListLayout")
@@ -251,6 +273,7 @@ cBtnLayout.FillDirection = Enum.FillDirection.Horizontal
 cBtnLayout.Padding = UDim.new(0, 6)
 cBtnLayout.Parent = cBtnRow
 
+local currentRec = nil
 local function cBtn(txt, color, cb)
     local b = Instance.new("TextButton")
     b.Size = UDim2.new(0, 78, 1, 0)
@@ -264,18 +287,13 @@ local function cBtn(txt, color, cb)
     b.Parent = cBtnRow
 end
 
-local currentRec = nil
-local currentRemote = nil
-
 local function showCallDetail(recId)
     for _, rec in ipairs(SS2.log) do
         if rec.id == recId then
             currentRec = rec
-            currentRemote = rec.remote
             cTitle.Text = ("CALL #%d — %s"):format(rec.id, rec.name)
             local body = ("name: %s\nclass: %s\npath: %s\ndir: %s\n\nARGS:\n%s"):format(
                 rec.name, rec.class, rec.path, rec.dir, table.concat(rec.args, "\n"))
-            -- caller data if available
             local prof = SS2.remotes[rec.remote]
             if prof and prof.callers and next(prof.callers) then
                 local cs = {}
@@ -292,7 +310,6 @@ local function showCallDetail(recId)
 end
 
 local function showRemoteDetail(r, prof)
-    currentRemote = r
     cTitle.Text = "REMOTE — " .. r.Name
     local body = ("name: %s\nclass: %s\npath: %s\ncalls: %d (out %d / in %d)\nhooked: %s | metaCaught: %s"):format(
         r.Name, prof.class, prof.path, prof.calls, prof.out, prof.inn,
@@ -322,17 +339,39 @@ end
 cClose.MouseButton1Click:Connect(function() card.Visible = false end)
 
 cBtn("REPLAY", T.ACCENT, function()
-    if currentRec then
+    if currentRec and SS2.replayId then
         SS2.replayId(currentRec.id)
     end
 end)
 cBtn("COPY", T.GREEN, function()
     if currentRec and setclipboard then
         setclipboard(table.concat(currentRec.args, ", "))
-    elseif currentRemote and setclipboard then
-        setclipboard(currentRemote:GetFullName())
     end
 end)
+cBtn("PRESET", T.YELL, function()
+    if currentRec and SS2.savePreset then
+        SS2.savePreset("ui_" .. currentRec.id, currentRec.id)
+    end
+end)
+cBtn("INSPECT", T.PURP, function()
+    if SS2.inspectLast then SS2.inspectLast() end
+end)
+
+-- ═══ SHARED ROW HELPER (the bug fix — defined ONCE, used everywhere) ═══
+local function addRow(txt, color, order)
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, -6, 0, 18)
+    l.BackgroundTransparency = 1
+    l.Font = Enum.Font.Code
+    l.TextSize = 12
+    l.TextColor3 = color or T.TEXT
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.TextTruncate = Enum.TextTruncate.AtEnd
+    l.Text = txt
+    l.LayoutOrder = order
+    l.Parent = content
+    return l
+end
 
 -- ═══ TAB RENDERERS ═══
 local function renderCalls()
@@ -368,31 +407,13 @@ local function renderCalls()
             end)
             b.Parent = content
             if n > 150 then
-                local t = Instance.new("TextLabel")
-                t.Size = UDim2.new(1, -6, 0, 18)
-                t.BackgroundTransparency = 1
-                t.Font = Enum.Font.Code
-                t.TextSize = 11
-                t.TextColor3 = T.DIM
-                t.TextXAlignment = Enum.TextXAlignment.Left
-                t.Text = "… (150+ shown — search to narrow)"
-                t.LayoutOrder = n + 1
-                t.Parent = content
+                addRow("… (150+ shown — use search to narrow)", T.DIM, n + 1)
                 break
             end
         end
     end
     if n == 0 then
-        local t = Instance.new("TextLabel")
-        t.Size = UDim2.new(1, -6, 0, 20)
-        t.BackgroundTransparency = 1
-        t.Font = Enum.Font.Code
-        t.TextSize = 12
-        t.TextColor3 = T.DIM
-        t.TextXAlignment = Enum.TextXAlignment.Left
-        t.Text = term ~= "" and ("no matches for '" .. term .. "'") or "(no calls yet — play the game)"
-        t.LayoutOrder = 1
-        t.Parent = content
+        addRow(term ~= "" and ("no matches for '" .. term .. "'") or "(no calls yet — play the game)", T.DIM, 1)
     end
 end
 
@@ -429,7 +450,82 @@ local function renderRemotes()
     end
 end
 
-local renderers = { renderCalls, renderRemotes }
+-- ═══ DECOMPILER TAB ═══
+local decompSel = nil
+
+local function renderDecompiler()
+    for _, c in ipairs(content:GetChildren()) do
+        if c:IsA("TextLabel") or c:IsA("TextButton") or c:IsA("TextBox") then c:Destroy() end
+    end
+
+    addRow("SCRIPT DECOMPILER — 3-layer (source/bytecode/constants)", T.ACCENT, 1)
+    addRow("", T.DIM, 2)
+    addRow("CONTAINER:", T.DIM, 3)
+
+    local containers = { "ReplicatedStorage", "StarterPlayer", "Players", "workspace", "StarterGui" }
+    for i, cname in ipairs(containers) do
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, -6, 0, 24)
+        b.BackgroundColor3 = (decompSel == cname) and T.ACCENT or T.CARD
+        b.Font = Enum.Font.Code
+        b.TextSize = 12
+        b.TextColor3 = T.TEXT
+        b.Text = "  " .. cname
+        b.LayoutOrder = 3 + i
+        corner(b, 4)
+        b.MouseButton1Click:Connect(function()
+            decompSel = cname
+            renderDecompiler()
+        end)
+        b.Parent = content
+    end
+
+    local btnBase = 3 + #containers + 1
+
+    local function mkBtn(txt, order, cb, col)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, -6, 0, 26)
+        b.BackgroundColor3 = col or T.ACCENT
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 12
+        b.TextColor3 = Color3.new(1, 1, 1)
+        b.Text = txt
+        b.LayoutOrder = order
+        corner(b, 6)
+        b.MouseButton1Click:Connect(cb)
+        b.Parent = content
+        return b
+    end
+
+    local resultLine = addRow("selected: " .. (decompSel or "(none)"), T.YELL, btnBase)
+    mkBtn("QUICK — config/main/init scripts", btnBase + 1, function()
+        if SS2.decomp and SS2.decomp.quick then
+            SS2.decomp.quick()
+            resultLine.Text = "quick pass running — console + decomp/ folder"
+        end
+    end)
+    mkBtn("BULK DUMP — " .. (decompSel or "SELECT CONTAINER FIRST"), btnBase + 2, function()
+        if not decompSel then
+            resultLine.Text = "!! select a container first"
+            return
+        end
+        if SS2.decomp and SS2.decomp.bulk then
+            SS2.decomp.bulk(decompSel, 200)
+            resultLine.Text = "bulk dumping " .. decompSel .. " — watch console"
+        end
+    end)
+    mkBtn("SCRIPT TREE (console, top 80)", btnBase + 3, function()
+        if SS2.decomp and SS2.decomp.tree then
+            SS2.decomp.tree(decompSel or "ReplicatedStorage")
+        end
+    end, T.CARD)
+
+    addRow("", T.DIM, btnBase + 5)
+    addRow("output: SimplySpirited/decomp/ (Delta workspace)", T.DIM, btnBase + 6)
+    addRow("src.lua | .bytecode | .constants.txt — take to PC", T.DIM, btnBase + 7)
+end
+
+local renderers = { renderCalls, renderRemotes, renderDecompiler }
 
 local function switchTab(i)
     currentTab = i
@@ -442,8 +538,8 @@ end
 
 for i, name in ipairs(TABS) do
     local b = Instance.new("TextButton")
-    b.Size = UDim2.new(0, 100, 1, 0)
-    b.Position = UDim2.new(0, 8 + (i - 1) * 105, 0, 0)
+    b.Size = UDim2.new(0, 95, 1, 0)
+    b.Position = UDim2.new(0, 8 + (i - 1) * 100, 0, 0)
     b.BackgroundTransparency = 1
     b.Text = name
     b.Font = Enum.Font.GothamBold
@@ -461,7 +557,6 @@ searchBar:GetPropertyChangedSignal("Text"):Connect(function()
     if currentTab == 1 then renderCalls() end
 end)
 
--- refresh loop: LIVE CALLS auto-updates when search is empty
 task.spawn(function()
     while gui.Parent do
         if currentTab == 1 and searchBar.Text == "" then
@@ -478,4 +573,4 @@ end)
 switchTab(1)
 
 SS2.gui = gui
-print("[SS2-ui] interface LIVE — click any call or remote")
+print("[SS2-ui] v3.2 LIVE — all windows draggable, decompiler tabbed")
