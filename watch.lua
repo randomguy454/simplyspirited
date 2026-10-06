@@ -1,20 +1,18 @@
 -- ════════════════════════════════════════════════════════════
---  SIMPLYSPIRITED v2.0 — SURVEILLANCE TIER (v2.1 updated)
+--  SIMPLYSPIRITED v3.1 — SURVEILLANCE ENGINE
 --  For SHADOWMILESC (computerizedcarrier2)
 --  ────────────────────────────────────────────────────────────
---  • Surveillance feed window (Draw, draggable, pausable)
---  • Remote deep-dives: full arg signature history per remote
---  • Arg presets: save/replay named call library
---  • API documentation generator v2
---  • v2.1: feed search
+--  Engine functions only — display owned by ui.lua.
+--  • pause/resume • remote deep-dives • replay engine (absorbed
+--    from draw.lua) • arg presets • API docs • feed search
 -- ════════════════════════════════════════════════════════════
 
-print("[SS2-watch] loading surveillance tier...")
+print("[SS2-watch] loading surveillance engine...")
 
 local SS2 = getgenv().SS2
 if not SS2 then warn("[SS2-watch] core must load first") return end
 
--- ═══════════ PAUSE / RESUME CAPTURE ═══════════
+-- ═══ PAUSE / RESUME ═══
 SS2.paused = false
 SS2.togglePause = function()
     SS2.paused = not SS2.paused
@@ -23,7 +21,7 @@ SS2.togglePause = function()
     return SS2.paused
 end
 
--- ═══════════ REMOTE DEEP-DIVE ═══════════
+-- ═══ REMOTE DEEP-DIVE ═══
 function SS2.profileRemote(nameOrPath)
     local matches = {}
     for r, prof in pairs(SS2.remotes) do
@@ -45,7 +43,6 @@ function SS2.profileRemote(nameOrPath)
         if prof.metaCaught and prof.metaCaught > 0 then
             print("  meta-net caught: " .. prof.metaCaught)
         end
-        print("  first: " .. prof.firstSeen .. " | last: " .. prof.lastSeen)
         local sigs = {}
         for sig, cnt in pairs(prof.sigs) do
             sigs[#sigs + 1] = { s = sig, c = cnt }
@@ -60,7 +57,44 @@ function SS2.profileRemote(nameOrPath)
 end
 SS2.profile = SS2.profileRemote
 
--- ═══════════ ARG PRESETS ═══════════
+-- ═══ REPLAY ENGINE (absorbed from draw.lua) ═══
+SS2.replayCount = 1
+
+function SS2.replayId(id)
+    local target
+    for _, rec in ipairs(SS2.log) do
+        if rec.id == id then target = rec break end
+    end
+    if not target then
+        print("[watch] call #" .. tostring(id) .. " not found")
+        return false
+    end
+    local r = target.remote
+    if not r or not r.Parent then
+        print("[watch] remote no longer exists")
+        return false
+    end
+    task.spawn(function()
+        for k = 1, SS2.replayCount do
+            if target.class == "RemoteEvent" then
+                pcall(function() r:FireServer(unpack(target.raw)) end)
+            elseif target.class == "RemoteFunction" then
+                pcall(function() r:InvokeServer(unpack(target.raw)) end)
+            end
+            if k < SS2.replayCount then task.wait(0.1) end
+        end
+        print("[watch] replayed #" .. id .. " x" .. SS2.replayCount)
+    end)
+    return true
+end
+
+function SS2.replayLast()
+    local rec = SS2.log[#SS2.log]
+    if not rec then print("[watch] no calls") return false end
+    return SS2.replayId(rec.id)
+end
+
+-- ═══ ARG PRESETS ═══
 SS2.presets = SS2.presets or {}
 
 function SS2.savePreset(name, callId)
@@ -81,7 +115,7 @@ function SS2.savePreset(name, callId)
         args = target.args,
         saved = os.date("%H:%M:%S"),
     }
-    print("[watch] preset '" .. name .. "' saved: " .. target.name .. " (" .. #target.raw .. " args)")
+    print("[watch] preset '" .. name .. "' saved: " .. target.name)
 end
 
 function SS2.playPreset(name, count, delay)
@@ -118,11 +152,11 @@ function SS2.listPresets()
     if n == 0 then print("  (empty)") end
 end
 
--- ═══════════ API DOC v2 ═══════════
+-- ═══ API DOC ═══
 function SS2.generateAPIDoc()
     local out = {}
     out[#out + 1] = "╔══════════════════════════════════════╗"
-    out[#out + 1] = "  SIMPLYSPIRITED v2.1 — API DOCUMENT"
+    out[#out + 1] = "  SIMPLYSPIRITED v3.1 — API DOCUMENT"
     out[#out + 1] = "  game: " .. SS2.game .. " | place: " .. SS2.placeId
     out[#out + 1] = "  generated: " .. os.date()
     out[#out + 1] = "  operator: SHADOWMILESC (computerizedcarrier2)"
@@ -137,7 +171,6 @@ function SS2.generateAPIDoc()
 
     out[#out + 1] = "TOTAL REMOTES: " .. #ranked
     out[#out + 1] = "TOTAL CALLS CAPTURED: " .. #SS2.log
-    out[#out + 1] = "META NET: " .. tostring(SS2.metaHooked)
     out[#out + 1] = ""
 
     for _, e in ipairs(ranked) do
@@ -145,10 +178,9 @@ function SS2.generateAPIDoc()
         out[#out + 1] = "──────────────────────────────────────"
         out[#out + 1] = ("REMOTE: %s (%s)"):format(e.r.Name, prof.class)
         out[#out + 1] = ("PATH:   %s"):format(prof.path)
-        out[#out + 1] = ("CALLS:  %d (out %d / in %d) | seen %s -> %s"):format(
-            prof.calls, prof.out, prof.inn, prof.firstSeen, prof.lastSeen)
+        out[#out + 1] = ("CALLS:  %d (out %d / in %d)"):format(prof.calls, prof.out, prof.inn)
         if prof.metaCaught and prof.metaCaught > 0 then
-            out[#out + 1] = ("  (meta-net caught %d of these)"):format(prof.metaCaught)
+            out[#out + 1] = ("  (meta-net caught %d)"):format(prof.metaCaught)
         end
         local sigs = {}
         for sig, cnt in pairs(prof.sigs) do
@@ -173,7 +205,7 @@ function SS2.generateAPIDoc()
 end
 SS2.apiDoc = SS2.generateAPIDoc
 
--- ═══════════ v2.1: FEED SEARCH ═══════════
+-- ═══ FEED SEARCH ═══
 function SS2.searchFeed(term)
     print('═══ FEED SEARCH: "' .. tostring(term) .. '" ═══')
     local n = 0
@@ -188,133 +220,8 @@ function SS2.searchFeed(term)
             end
         end
     end
-    if n == 0 then
-        print("  (no matches)")
-    end
+    if n == 0 then print("  (no matches)") end
     return n
 end
 
--- ═══════════ LIVE FEED WINDOW (Draw) ═══════════
-local THEME = SS2.theme
-local UIS = game:GetService("UserInputService")
-
-local fw = { x = 600, y = 60, w = 460, h = 320, headerH = 26, dragging = false, open = true }
-SS2.feedWin = fw
-
-local drawObjects = {}
-local function newD(class, props)
-    local ok, obj = pcall(function()
-        local d = Drawing.new(class)
-        for k, v in pairs(props) do d[k] = v end
-        return d
-    end)
-    if ok and obj then drawObjects[#drawObjects + 1] = obj return obj end
-end
-
-local bg = newD("Square", { Size = Vector2.new(fw.w, fw.h), Position = Vector2.new(fw.x, fw.y), Color = Color3.fromRGB(12, 12, 16), Filled = true, Visible = true })
-local hdr = newD("Square", { Size = Vector2.new(fw.w, fw.headerH), Position = Vector2.new(fw.x, fw.y), Color = THEME.PANEL, Filled = true, Visible = true })
-local border = newD("Square", { Size = Vector2.new(fw.w, fw.h), Position = Vector2.new(fw.x, fw.y), Color = THEME.GREEN, Filled = false, Transparency = 0.6, Visible = true })
-local title = newD("Text", { Text = "SURVEILLANCE FEED — " .. SS2.game:sub(1, 24), Size = 13, Position = Vector2.new(fw.x + 8, fw.y + 6), Color = THEME.GREEN, Visible = true, Outline = true })
-local closeT = newD("Text", { Text = "X", Size = 13, Position = Vector2.new(fw.x + fw.w - 18, fw.y + 5), Color = THEME.RED, Visible = true, Outline = true })
-local pauseBtn = newD("Text", { Text = "[PAUSE]", Size = 12, Position = Vector2.new(fw.x + fw.w - 90, fw.y + 5), Color = THEME.ACCENT, Visible = true, Outline = true })
-local statT = newD("Text", { Text = "", Size = 12, Position = Vector2.new(fw.x + 8, fw.y + fw.h - 20), Color = THEME.DIM, Visible = true, Outline = true })
-
-local feedTexts = {}
-local FEED_ROWS = 13
-for i = 1, FEED_ROWS do
-    feedTexts[i] = newD("Text", {
-        Text = "", Size = 12,
-        Position = Vector2.new(fw.x + 8, fw.y + fw.headerH + 4 + (i - 1) * 17),
-        Color = THEME.TEXT, Visible = true, Outline = true,
-    })
-end
-
-local function refreshFeed()
-    local shown = 0
-    for i = #SS2.log, 1, -1 do
-        local rec = SS2.log[i]
-        shown = shown + 1
-        local idx = FEED_ROWS - shown + 1
-        if idx >= 1 and feedTexts[idx] then
-            local col = rec.dir == "OUT" and THEME.GREEN or THEME.TEXT
-            feedTexts[idx].Text = ("#%d %s %s | %s"):format(
-                rec.id, rec.dir, rec.name:sub(1, 18),
-                (rec.args[1] and tostring(rec.args[1]):sub(1, 40)) or "")
-            feedTexts[idx].Color = col
-        end
-        if shown >= FEED_ROWS then break end
-    end
-    for i = 1, FEED_ROWS - shown do
-        if feedTexts[i] then feedTexts[i].Text = "" end
-    end
-    local rc = 0
-    for _ in pairs(SS2.remotes) do rc = rc + 1 end
-    statT.Text = ("remotes: %d | captured: %d | %s%s"):format(
-        rc, #SS2.log, SS2.paused and "PAUSED" or "LIVE",
-        SS2.metaHooked and " | NET" or "")
-end
-
--- ═══ DRAG + BUTTONS ═══
-UIS.InputBegan:Connect(function(input, processed)
-    if processed or not fw.open then return end
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-    or input.UserInputType == Enum.UserInputType.Touch then
-        local m = UIS:GetMouseLocation()
-        local px, py = m.X, m.Y
-        if px >= fw.x + fw.w - 26 and px <= fw.x + fw.w - 6 and py >= fw.y and py <= fw.y + fw.headerH then
-            fw.open = false
-            for _, d in ipairs(drawObjects) do d.Visible = false end
-            print("[watch] feed window closed (engine still running)")
-            return
-        end
-        if px >= fw.x + fw.w - 100 and px <= fw.x + fw.w - 30 and py >= fw.y and py <= fw.y + fw.headerH then
-            SS2.togglePause()
-            pauseBtn.Text = SS2.paused and "[RESUME]" or "[PAUSE]"
-            return
-        end
-        if px >= fw.x and px <= fw.x + fw.w and py >= fw.y and py <= fw.y + fw.headerH then
-            fw.dragging = true
-            fw.off = { x = px - fw.x, y = py - fw.y }
-        end
-    end
-end)
-
-UIS.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-    or input.UserInputType == Enum.UserInputType.Touch then
-        fw.dragging = false
-    end
-end)
-
--- ═══ MAIN LOOP ═══
-local lastRefresh = 0
-task.spawn(function()
-    while fw.open do
-        if fw.dragging then
-            local m = UIS:GetMouseLocation()
-            local nx, ny = m.X - fw.off.x, m.Y - fw.off.y
-            local dx, dy = nx - fw.x, ny - fw.y
-            fw.x, fw.y = nx, ny
-            for _, d in ipairs(drawObjects) do
-                pcall(function()
-                    d.Position = d.Position + Vector2.new(dx, dy)
-                end)
-            end
-        end
-        if os.clock() - lastRefresh > 0.4 then
-            lastRefresh = os.clock()
-            refreshFeed()
-        end
-        task.wait(0.03)
-    end
-end)
-
-print("[SS2-watch] surveillance tier LIVE (v2.1)")
-print("[watch] console commands:")
-print("  SS2.profileRemote('name')  — deep-dive any remote")
-print("  SS2.savePreset('name')     — save last call as preset")
-print("  SS2.playPreset('name', n)  — replay a preset n times")
-print("  SS2.listPresets()          — your call library")
-print("  SS2.generateAPIDoc()       — API documentation -> file")
-print("  SS2.togglePause()          — pause/resume capture")
-print("  SS2.searchFeed('term')     — search all captured calls (v2.1)")
+print("[SS2-watch] surveillance engine LIVE (display = ui.lua)")
