@@ -1,262 +1,606 @@
 --[[
-    simplyspirited v4.6 — loader
+    simplyspirited v4.8 — interface
     SHADOWMILESC / computerizedcarrier2
 
-    one line, any game:
-    loadstring(game:HttpGet(".../Load.lua?nocache=" .. os.time()))()
-
-    load order = wrapper nesting. the order below is deliberate:
-      core       (logic, innermost)
-      governor   (rate gate)
-      callers    (attribution — outermost wrapper, ungated)
-      closure    (function forensics, describes patched)
-      watch      (engine functions: replay, presets, docs)
-      ui         (display)
-      output-tier modules (stealth, describe_ext)
-      intel tiers (decomp, export, ss_dump)
-
-    the splash is the boot report: live lines, named failures,
-    halt-on-required, progress bar, clean handoff to the ui.
+    error-proof edition:
+    - strict declaration order (zero forward references)
+    - selection locks the view; "LIVE" button releases it
+    - differential rendering (rebuild only on new calls)
+    - professional dark layout, four tabs
 ]]
 
--- ═══ splash ═══
+print("[SS2-ui] v4.8 building...")
+
 local Players = game:GetService("Players")
-local P = Players.LocalPlayer
 local UIS = game:GetService("UserInputService")
+local P = Players.LocalPlayer
 
-local gui = Instance.new("ScreenGui")
-gui.Name = "SS2_Loader"
-gui.ResetOnSpawn = false
-gui.DisplayOrder = 99999
-local okRoot = pcall(function()
-    gui.Parent = (typeof(gethui) == "function" and gethui()) or game:GetService("CoreGui")
-end)
-if not okRoot then gui.Parent = P:WaitForChild("PlayerGui") end
+local SS2 = getgenv().SS2
+if not SS2 then
+    warn("ss2-ui: core.lua must load first")
+    return
+end
 
+-- ════════════════════════════════════════════════════════════
+-- PALETTE
+-- ════════════════════════════════════════════════════════════
 local T = {
-    BG   = Color3.fromRGB(8, 8, 8),
-    RAIL = Color3.fromRGB(14, 14, 14),
-    TEXT = Color3.fromRGB(210, 210, 210),
-    DIM  = Color3.fromRGB(98, 98, 98),
-    RED  = Color3.fromRGB(198, 38, 48),
+    BG     = Color3.fromRGB(12, 12, 14),
+    RAIL   = Color3.fromRGB(19, 19, 23),
+    CARD   = Color3.fromRGB(26, 26, 31),
+    HI     = Color3.fromRGB(34, 34, 40),
+    TEXT   = Color3.fromRGB(225, 225, 228),
+    DIM    = Color3.fromRGB(115, 115, 122),
+    FAINT  = Color3.fromRGB(70, 70, 76),
+    ACCENT = Color3.fromRGB(90, 140, 250),
+    RED    = Color3.fromRGB(210, 70, 80),
+    GREEN  = Color3.fromRGB(70, 190, 120),
 }
 
-local win = Instance.new("Frame")
-win.Size = UDim2.fromOffset(360, 240)
-win.Position = UDim2.new(0.5, -180, 0.5, -120)
+-- ════════════════════════════════════════════════════════════
+-- STATE (all of it, before anything that uses it)
+-- ════════════════════════════════════════════════════════════
+local gui = Instance.new("ScreenGui")
+gui.Name = "SS2_Interface"
+gui.ResetOnSpawn = false
+gui.DisplayOrder = 9999
+
+local win, header, status
+local tabBtns = {}
+local content
+local currentTab = 1
+local pinned = true
+local lockedCallId = nil
+local lockedRemote = nil
+local lastRenderCount = -1
+local lastGrep = ""
+local minimized = false
+
+pcall(function()
+    gui.Parent = (typeof(gethui) == "function" and gethui()) or game:GetService("CoreGui")
+end)
+if not gui.Parent then
+    gui.Parent = P:WaitForChild("PlayerGui")
+end
+
+-- ════════════════════════════════════════════════════════════
+-- WINDOW SHELL
+-- ════════════════════════════════════════════════════════════
+win = Instance.new("Frame")
+win.Size = UDim2.fromOffset(520, 360)
+win.Position = UDim2.fromOffset(30, 40)
 win.BackgroundColor3 = T.BG
 win.BorderSizePixel = 0
 win.Active = true
 win.Parent = gui
 
-local dragging, dStart, dPos = false, nil, nil
-local hdr = Instance.new("Frame")
-hdr.Size = UDim2.new(1, 0, 0, 22)
-hdr.BackgroundColor3 = T.RAIL
-hdr.BorderSizePixel = 0
-hdr.Parent = win
-local hT = Instance.new("TextLabel")
-hT.Size = UDim2.new(1, -12, 1, 0)
-hT.Position = UDim2.fromOffset(8, 0)
-hT.BackgroundTransparency = 1
-hT.Font = Enum.Font.Code
-hT.TextSize = 11
-hT.TextColor3 = T.TEXT
-hT.TextXAlignment = Enum.TextXAlignment.Left
-hT.Text = "simplyspirited — v4.6"
-hT.Parent = hdr
-hdr.InputBegan:Connect(function(i)
+local function addCorner(o)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 4)
+    c.Parent = o
+end
+
+header = Instance.new("Frame")
+header.Size = UDim2.new(1, 0, 0, 30)
+header.BackgroundColor3 = T.RAIL
+header.BorderSizePixel = 0
+header.Parent = win
+
+local dot = Instance.new("Frame")
+dot.Size = UDim2.fromOffset(8, 8)
+dot.Position = UDim2.fromOffset(10, 11)
+dot.BackgroundColor3 = T.GREEN
+dot.BorderSizePixel = 0
+dot.Parent = header
+
+local hTitle = Instance.new("TextLabel")
+hTitle.Size = UDim2.new(0, 200, 1, 0)
+hTitle.Position = UDim2.fromOffset(24, 0)
+hTitle.BackgroundTransparency = 1
+hTitle.Font = Enum.Font.GothamMedium
+hTitle.TextSize = 12
+hTitle.TextColor3 = T.TEXT
+hTitle.TextXAlignment = Enum.TextXAlignment.Left
+hTitle.Text = "SIMPLYSPIRITED"
+hTitle.Parent = header
+
+local hSub = Instance.new("TextLabel")
+hSub.Size = UDim2.new(0, 80, 1, 0)
+hSub.Position = UDim2.fromOffset(130, 0)
+hSub.BackgroundTransparency = 1
+hSub.Font = Enum.Font.Code
+hSub.TextSize = 10
+hSub.TextColor3 = T.FAINT
+hSub.TextXAlignment = Enum.TextXAlignment.Left
+hSub.Text = "v4.8"
+hSub.Parent = header
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.fromOffset(24, 30)
+closeBtn.Position = UDim2.new(1, -26, 0, 0)
+closeBtn.BackgroundTransparency = 1
+closeBtn.Font = Enum.Font.Code
+closeBtn.TextSize = 13
+closeBtn.TextColor3 = T.DIM
+closeBtn.Text = "✕"
+closeBtn.Parent = header
+
+-- drag
+local dragOn = false
+local dragStart, dragPos
+header.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1
     or i.UserInputType == Enum.UserInputType.Touch then
-        dragging = true
-        dStart = i.Position
-        dPos = win.Position
+        dragOn = true
+        dragStart = i.Position
+        dragPos = win.Position
     end
 end)
 UIS.InputChanged:Connect(function(i)
-    if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement
+    if dragOn and (i.UserInputType == Enum.UserInputType.MouseMovement
     or i.UserInputType == Enum.UserInputType.Touch) then
-        local d = i.Position - dStart
-        win.Position = UDim2.new(dPos.X.Scale, dPos.X.Offset + d.X,
-            dPos.Y.Scale, dPos.Y.Offset + d.Y)
+        local d = i.Position - dragStart
+        win.Position = UDim2.new(dragPos.X.Scale, dragPos.X.Offset + d.X,
+            dragPos.Y.Scale, dragPos.Y.Offset + d.Y)
     end
 end)
-UIS.InputEnded:Connect(function()
-    dragging = false
+UIS.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1
+    or i.UserInputType == Enum.UserInputType.Touch then
+        dragOn = false
+    end
+end)
+closeBtn.MouseButton1Click:Connect(function()
+    gui:Destroy()
 end)
 
-local logFrame = Instance.new("Frame")
-logFrame.Size = UDim2.new(1, -16, 1, -66)
-logFrame.Position = UDim2.fromOffset(8, 30)
-logFrame.BackgroundTransparency = 1
-logFrame.Parent = win
-local logLayout = Instance.new("UIListLayout")
-logLayout.Padding = UDim.new(0, 2)
-logLayout.SortOrder = Enum.SortOrder.LayoutOrder
-logLayout.Parent = logFrame
+-- ════════════════════════════════════════════════════════════
+-- TAB STRIP
+-- ════════════════════════════════════════════════════════════
+local TABS = { "CALLS", "REMOTES", "DECOMPILER", "TOOLS" }
+local tabStrip = Instance.new("Frame")
+tabStrip.Size = UDim2.new(1, 0, 0, 28)
+tabStrip.Position = UDim2.new(0, 0, 0, 30)
+tabStrip.BackgroundColor3 = T.RAIL
+tabStrip.BorderSizePixel = 0
+tabStrip.Parent = win
 
-local lineCount = 0
-local function addLine(text, color)
-    lineCount = lineCount + 1
+local grepBox = Instance.new("TextBox")
+grepBox.Size = UDim2.new(0, 140, 0, 22)
+grepBox.Position = UDim2.new(1, -150, 0, 3)
+grepBox.BackgroundColor3 = T.CARD
+grepBox.PlaceholderText = "filter…"
+grepBox.Text = ""
+grepBox.Font = Enum.Font.Code
+grepBox.TextSize = 11
+grepBox.TextColor3 = T.TEXT
+grepBox.PlaceholderColor3 = T.FAINT
+grepBox.ClearTextOnFocus = false
+addCorner(grepBox)
+grepBox.Parent = tabStrip
+
+-- ════════════════════════════════════════════════════════════
+-- CONTENT + STATUS
+-- ════════════════════════════════════════════════════════════
+content = Instance.new("ScrollingFrame")
+content.Size = UDim2.new(1, -16, 1, -96)
+content.Position = UDim2.fromOffset(8, 66)
+content.BackgroundTransparency = 1
+content.BorderSizePixel = 0
+content.ScrollBarThickness = 4
+content.ScrollBarImageColor3 = T.FAINT
+content.AutomaticCanvasSize = Enum.AutomaticSize.Y
+content.CanvasSize = UDim2.new(0, 0, 0, 0)
+content.Parent = win
+
+local contentLayout = Instance.new("UIListLayout")
+contentLayout.Padding = UDim.new(0, 2)
+contentLayout.SortOrder = Enum.SortOrder.LayoutOrder
+contentLayout.Parent = content
+
+status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, -16, 0, 20)
+status.Position = UDim2.new(0, 8, 1, -26)
+status.BackgroundColor3 = T.RAIL
+status.Font = Enum.Font.Code
+status.TextSize = 10
+status.TextColor3 = T.DIM
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.Text = ""
+addCorner(status)
+status.Parent = win
+
+-- ════════════════════════════════════════════════════════════
+-- CONTENT HELPERS (all defined before renderers)
+-- ════════════════════════════════════════════════════════════
+local function clearContent()
+    for _, c in ipairs(content:GetChildren()) do
+        if c:IsA("TextLabel") or c:IsA("TextButton") or c:IsA("Frame") then
+            c:Destroy()
+        end
+    end
+end
+
+local function tLine(txt, col, order)
     local l = Instance.new("TextLabel")
-    l.Size = UDim2.new(1, 0, 0, 14)
+    l.Size = UDim2.new(1, -8, 0, 16)
+    l.Position = UDim2.fromOffset(6, 0)
     l.BackgroundTransparency = 1
     l.Font = Enum.Font.Code
-    l.TextSize = 10
-    l.TextColor3 = color or T.DIM
+    l.TextSize = 12
+    l.TextColor3 = col or T.TEXT
     l.TextXAlignment = Enum.TextXAlignment.Left
     l.TextTruncate = Enum.TextTruncate.AtEnd
-    l.Text = text
-    l.LayoutOrder = lineCount
-    l.Parent = logFrame
-    if lineCount > 12 then
-        for _, c in ipairs(logFrame:GetChildren()) do
-            if c:IsA("TextLabel") and c.LayoutOrder <= lineCount - 12 then
-                c:Destroy()
-            end
-        end
-    end
+    l.Text = txt
+    l.LayoutOrder = order
+    l.Parent = content
 end
 
-local barBG = Instance.new("Frame")
-barBG.Size = UDim2.new(1, -16, 0, 4)
-barBG.Position = UDim2.new(0, 8, 1, -24)
-barBG.BackgroundColor3 = T.RAIL
-barBG.BorderSizePixel = 0
-barBG.Parent = win
-local barFill = Instance.new("Frame")
-barFill.Size = UDim2.new(0, 0, 1, 0)
-barFill.BackgroundColor3 = T.RED
-barFill.BorderSizePixel = 0
-barFill.Parent = barBG
+local function tSection(txt, order)
+    local s = Instance.new("TextLabel")
+    s.Size = UDim2.new(1, -8, 0, 22)
+    s.Position = UDim2.fromOffset(6, 0)
+    s.BackgroundColor3 = T.RAIL
+    s.BorderSizePixel = 0
+    s.Font = Enum.Font.GothamMedium
+    s.TextSize = 11
+    s.TextColor3 = T.DIM
+    s.TextXAlignment = Enum.TextXAlignment.Left
+    s.Text = "  " .. txt
+    s.LayoutOrder = order
+    addCorner(s)
+    s.Parent = content
+end
 
-local pctLabel = Instance.new("TextLabel")
-pctLabel.Size = UDim2.new(0, 60, 0, 14)
-pctLabel.Position = UDim2.new(1, -68, 1, -32)
-pctLabel.BackgroundTransparency = 1
-pctLabel.Font = Enum.Font.Code
-pctLabel.TextSize = 10
-pctLabel.TextColor3 = T.DIM
-pctLabel.TextXAlignment = Enum.TextXAlignment.Right
-pctLabel.Text = "0%"
-pctLabel.Parent = win
+local function tBtn(txt, col, order, cb)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, -8, 0, 22)
+    b.Position = UDim2.fromOffset(6, 0)
+    b.BackgroundColor3 = T.CARD
+    b.Font = Enum.Font.Code
+    b.TextSize = 12
+    b.TextColor3 = col or T.TEXT
+    b.TextXAlignment = Enum.TextXAlignment.Left
+    b.TextTruncate = Enum.TextTruncate.AtEnd
+    b.Text = "  " .. txt
+    b.LayoutOrder = order
+    addCorner(b)
+    b.MouseButton1Click:Connect(cb)
+    b.Parent = content
+end
 
-addLine("ss2 :: simplyspirited v4.6", T.TEXT)
-addLine("operator: " .. P.Name, T.DIM)
-addLine("", T.DIM)
-
--- ═══ CONFIG ═══
-local REPO = "https://raw.githubusercontent.com/randomguy454/simplyspirited/refs/heads/main/"
-
-local PARTS = {
-    { file = "core.lua",         name = "ENGINE",       required = true  },
-    { file = "governor.lua",     name = "GOVERNOR",     required = false },
-    { file = "callers.lua",      name = "CALLERS",      required = false },
-    { file = "closure.lua",      name = "CLOSURE",      required = false },
-    { file = "watch.lua",        name = "SURVEILLANCE", required = false },
-    { file = "ui.lua",           name = "INTERFACE",    required = true  },
-    { file = "stealth.lua",      name = "STEALTH",      required = false },
-    { file = "describe_ext.lua", name = "ARG FIDELITY", required = false },
-    { file = "decomp.lua",       name = "DECOMPILER",   required = false },
-    { file = "export.lua",       name = "VAULT",        required = false },
-    { file = "ss_dump.lua",      name = "GAME DUMP",    required = false },
-}
-
--- ═══ CLEAN STATE WIPE ═══
-getgenv().SS2 = nil
-getgenv().SS2_READY = nil
-getgenv().SS2_UI = nil
-getgenv().SIMPLYSPIRITED_V2 = nil
-
--- ═══ LOAD SEQUENCE ═══
-local loaded, failed = 0, {}
-local results = {}
-
-for i, part in ipairs(PARTS) do
-    local pct = math.floor((i - 1) / #PARTS * 100)
-    pctLabel.Text = pct .. "%"
-    barFill.Size = UDim2.new(pct / 100, 0, 1, 0)
-
-    local url = REPO .. part.file .. "?nocache=" .. os.time() .. i
-    local src
-
-    local okFetch = pcall(function()
-        src = game:HttpGet(url)
-    end)
-
-    if not okFetch or type(src) ~= "string" or #src < 10 then
-        failed[#failed + 1] = part.name .. " (fetch)"
-        results[#results + 1] = { name = part.name, ok = false, why = "fetch" }
-        addLine("  ✗ " .. part.name .. " — fetch failed", T.RED)
-        if part.required then
-            addLine("!! boot halted — " .. part.file .. " required", T.RED)
-            task.wait(3)
-            gui:Destroy()
-            return
-        end
-    else
-        local fn, compileErr = loadstring(src)
-        if not fn then
-            failed[#failed + 1] = part.name .. " (compile)"
-            results[#results + 1] = { name = part.name, ok = false, why = "compile" }
-            addLine("  ✗ " .. part.name .. " — COMPILE: " .. tostring(compileErr), T.RED)
-            if part.required then
-                addLine("!! boot halted — required part broken", T.RED)
-                task.wait(3)
-                gui:Destroy()
-                return
+-- ════════════════════════════════════════════════════════════
+-- DETAIL RENDERERS (before click handlers — strict order)
+-- ════════════════════════════════════════════════════════════
+local function showCallDetail(id)
+    for _, rec in ipairs(SS2.log) do
+        if rec.id == id then
+            clearContent()
+            tSection("CALL #" .. id .. " — " .. rec.name, 1)
+            tLine("path   " .. rec.path, T.DIM, 2)
+            tLine("dir    " .. rec.dir, T.DIM, 3)
+            tLine("", T.DIM, 4)
+            tSection("ARGUMENTS", 5)
+            for i, a in ipairs(rec.args) do
+                tLine(("  %d  %s"):format(i, a), T.TEXT, 5 + i)
             end
-        else
-            local okRun, runErr = pcall(fn)
-            if okRun then
-                loaded = loaded + 1
-                results[#results + 1] = { name = part.name, ok = true }
-                addLine("  ✓ " .. part.name, T.TEXT)
-            else
-                failed[#failed + 1] = part.name .. " (runtime)"
-                results[#results + 1] = { name = part.name, ok = false, why = "runtime" }
-                addLine("  ✗ " .. part.name .. " — runtime: " .. tostring(runErr), T.RED)
-                if part.required then
-                    addLine("!! boot halted — required part broken", T.RED)
-                    task.wait(3)
-                    gui:Destroy()
-                    return
+            local prof = rec.remote and SS2.remotes[rec.remote]
+            if prof and prof.callers and next(prof.callers) then
+                tLine("", T.DIM, 29)
+                tSection("CALLERS", 30)
+                local cs = {}
+                for c, n in pairs(prof.callers) do
+                    cs[#cs + 1] = { c = c, n = n }
+                end
+                table.sort(cs, function(a, b) return a.n > b.n end)
+                for k, e in ipairs(cs) do
+                    tLine(("  %s  x%d"):format(e.c, e.n), T.DIM, 30 + k)
                 end
             end
+            tLine("", T.DIM, 59)
+            tBtn("← BACK TO LIVE FEED", T.ACCENT, 60, function()
+                lockedCallId = nil
+                pinned = true
+                lastRenderCount = -1
+                -- re-render through the current tab mechanism
+                if currentTab == 1 then
+                    renderCallsSafe()
+                end
+            end)
+            return
         end
     end
-    task.wait(0.05)
 end
 
--- ═══ FINAL REPORT ═══
-pctLabel.Text = "100%"
-barFill.Size = UDim2.new(1, 0, 1, 0)
-
-if #failed == 0 then
-    addLine("── " .. loaded .. "/" .. #PARTS .. " online ──", T.TEXT)
-elseif loaded > 0 then
-    addLine("── partial: " .. loaded .. "/" .. #PARTS .. " ──", T.RED)
-    for _, f in ipairs(failed) do
-        addLine("  failed: " .. f, T.RED)
+local function showRemoteDetail(r, prof)
+    clearContent()
+    tSection("REMOTE — " .. r.Name .. " (" .. prof.class .. ")", 1)
+    tLine("path   " .. (prof.path or "?"), T.DIM, 2)
+    tLine("calls  " .. prof.calls .. " (out " .. prof.out .. " / in " .. prof.inn .. ")", T.TEXT, 3)
+    tLine("net-caught  " .. tostring(prof.metaCaught or 0), T.DIM, 4)
+    tLine("seen   " .. prof.firstSeen .. " -> " .. prof.lastSeen, T.DIM, 5)
+    tLine("", T.DIM, 6)
+    tSection("SIGNATURES — " .. (function()
+        local n = 0
+        for _ in pairs(prof.sigs) do n = n + 1 end
+        return n
+    end)() .. " unique", 7)
+    local sigs = {}
+    for sig, cnt in pairs(prof.sigs) do
+        sigs[#sigs + 1] = { s = sig, c = cnt }
     end
-else
-    addLine("── TOTAL BOOT FAILURE ──", T.RED)
-    task.wait(3)
-    gui:Destroy()
-    return
+    table.sort(sigs, function(a, b) return a.c > b.c end)
+    for k = 1, math.min(24, #sigs) do
+        tLine(("  x%d  %s"):format(sigs[k].c, sigs[k].s), T.TEXT, 7 + k)
+    end
+    tLine("", T.DIM, 40)
+    tBtn("← BACK TO LIVE FEED", T.ACCENT, 41, function()
+        lockedRemote = nil
+        pinned = true
+        lastRenderCount = -1
+        if currentTab == 1 then
+            renderCallsSafe()
+        end
+    end)
 end
 
--- ═══ FINGERPRINT ═══
-local SS2 = getgenv().SS2
-if SS2 then
-    SS2.sessionStart = os.date()
-    SS2.operator = "SHADOWMILESC"
-    SS2.displayName = "computerizedcarrier2"
-    SS2.version = "4.6"
-end
-getgenv().SIMPLYSPIRITED_V2 = loaded
+-- forward declaration for the re-render hook (defined later,
+-- referenced by BACK buttons — assigned before any click can fire)
+local renderCallsSafe
 
--- ═══ HANDOFF ═══
-task.wait(1.2)
-gui:Destroy()
-print("[loader] " .. loaded .. "/" .. #PARTS .. " | simplyspirited v4.6 | SHADOWMILESC")
+-- ════════════════════════════════════════════════════════════
+-- TAB RENDERERS (strict order, no forward refs)
+-- ════════════════════════════════════════════════════════════
+local function renderCalls(force)
+    local rebuild = force
+        or (lockedCallId ~= nil)
+        or (#SS2.log - lastRenderCount >= 5)
+        or (grepBox.Text ~= lastGrep)
+
+    if not rebuild then return end
+    lastRenderCount = #SS2.log
+    lastGrep = grepBox.Text
+
+    clearContent()
+    local n = 0
+    for i = #SS2.log, 1, -1 do
+        local rec = SS2.log[i]
+        local hay = (rec.name .. " " .. table.concat(rec.args, " ")):lower()
+        if lastGrep == "" or hay:find(lastGrep, 1, true) then
+            n = n + 1
+            local id = rec.id
+            local isLocked = (lockedCallId == id)
+            local b = Instance.new("TextButton")
+            b.Size = UDim2.new(1, -8, 0, 24)
+            b.Position = UDim2.fromOffset(6, 0)
+            b.BackgroundColor3 = isLocked and T.HI or T.CARD
+            b.Font = Enum.Font.Code
+            b.TextSize = 12
+            b.TextColor3 = rec.dir == "OUT" and T.GREEN or T.TEXT
+            b.TextXAlignment = Enum.TextXAlignment.Left
+            b.TextTruncate = Enum.TextTruncate.AtEnd
+            b.Text = ("  #%d %s  %s"):format(id, rec.dir, rec.name)
+            b.LayoutOrder = n
+            addCorner(b)
+            b.MouseButton1Click:Connect(function()
+                lockedCallId = id
+                pinned = false
+                showCallDetail(id)
+            end)
+            b.Parent = content
+            if n > 80 then
+                tLine("  … (80+ — filter to narrow)", T.DIM, n + 1)
+                break
+            end
+        end
+    end
+    if n == 0 then
+        tLine(lastGrep ~= "" and ("no matches — " .. lastGrep)
+            or "no calls yet — play the game", T.DIM, 1)
+    end
+end
+
+-- assign the forward-declared re-render hook
+renderCallsSafe = function()
+    if currentTab == 1 then
+        renderCalls(true)
+    end
+end
+
+local function renderRemotes(force)
+    if not force and lockedRemote then return end
+    clearContent()
+    local ranked = {}
+    for r, prof in pairs(SS2.remotes) do
+        ranked[#ranked + 1] = { r = r, p = prof }
+    end
+    table.sort(ranked, function(a, b) return a.p.calls > b.p.calls end)
+    for k = 1, math.min(120, #ranked) do
+        local e = ranked[k]
+        local rr, pp = e.r, e.p
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, -8, 0, 24)
+        b.Position = UDim2.fromOffset(6, 0)
+        b.BackgroundColor3 = T.CARD
+        b.Font = Enum.Font.Code
+        b.TextSize = 12
+        b.TextColor3 = pp.calls > 0 and T.TEXT or T.FAINT
+        b.TextXAlignment = Enum.TextXAlignment.Left
+        b.TextTruncate = Enum.TextTruncate.AtEnd
+        b.Text = ("  %4d  %-6s %s"):format(pp.calls, pp.class:sub(1, 6), pp.path)
+        b.LayoutOrder = k
+        addCorner(b)
+        b.MouseButton1Click:Connect(function()
+            lockedRemote = rr
+            showRemoteDetail(rr, pp)
+        end)
+        b.Parent = content
+    end
+end
+
+local function renderDecompiler(force)
+    clearContent()
+    if not (SS2.decomp and SS2.decomp.caps) then
+        tLine("decomp.lua not loaded", T.DIM, 1)
+        return
+    end
+    local sel = SS2._dcontainer or "ReplicatedStorage"
+
+    tSection("DECOMPILER v4.0 — 6-LAYER ANALYSIS", 1)
+    tLine("capabilities: source=" .. tostring(SS2.decomp.caps.source)
+        .. "  bytecode=" .. tostring(SS2.decomp.caps.bytecode), T.DIM, 2)
+    tLine("container: " .. sel, T.TEXT, 3)
+    tLine("", T.DIM, 4)
+
+    local containers = { "ReplicatedStorage", "StarterPlayer", "Players", "workspace" }
+    for i, cname in ipairs(containers) do
+        tBtn((sel == cname and "● " or "○ ") .. cname,
+            sel == cname and T.TEXT or T.DIM, 4 + i, function()
+            SS2._dcontainer = cname
+            renderDecompiler(true)
+        end)
+    end
+
+    tLine("", T.DIM, 10)
+    tBtn("QUICK — config/main/init/network scripts", T.TEXT, 11, function()
+        if SS2.decomp.quick then SS2.decomp.quick() end
+    end)
+    tBtn("BULK DUMP — " .. sel .. " (200 scripts)", T.TEXT, 12, function()
+        if SS2.decomp.bulk then SS2.decomp.bulk(sel, 200) end
+    end)
+    tBtn("SCRIPT TREE — console view", T.DIM, 13, function()
+        if SS2.decomp.tree then SS2.decomp.tree(sel) end
+    end)
+
+    tLine("", T.DIM, 15)
+    tSection("OUTPUT", 16)
+    tLine("  SimplySpirited/decomp/ -> workspace", T.DIM, 17)
+    tLine("  .src.lua / .bytecode / .constants.txt", T.DIM, 18)
+    tLine("  xref = script references a seen remote", T.GREEN, 19)
+end
+
+local function renderTools(force)
+    clearContent()
+    tSection("CAPTURE", 1)
+    tBtn("pause / resume capture", T.TEXT, 2, function()
+        if SS2.togglePause then SS2.togglePause() end
+    end)
+    tBtn("verbosity: " .. tostring(SS2.verbosity) .. " (cycle)", T.TEXT, 3, function()
+        local map = { quiet = "smart", smart = "loud", loud = "quiet" }
+        if SS2.setVerbosity then SS2.setVerbosity(map[SS2.verbosity] or "smart") end
+        renderTools(true)
+    end)
+    tBtn("rescan remotes now", T.TEXT, 4, function()
+        if SS2.scanRemotes then SS2.scanRemotes() end
+    end)
+
+    tSection("INTEL", 6)
+    tBtn("generate API documentation", T.TEXT, 7, function()
+        if SS2.generateAPIDoc then SS2.generateAPIDoc() end
+    end)
+    tBtn("master dump", T.TEXT, 8, function()
+        if SS2.dumpAll then SS2.dumpAll() end
+    end)
+    tBtn("discovery audit", T.TEXT, 9, function()
+        if SS2.dumpAudit then SS2.dumpAudit() end
+    end)
+    tBtn("per-remote dossiers", T.TEXT, 10, function()
+        if SS2.dumpPerRemote then SS2.dumpPerRemote() end
+    end)
+    tBtn("top call sites (console)", T.TEXT, 11, function()
+        if SS2.topCallers then SS2.topCallers(20) end
+    end)
+
+    tSection("VAULT", 13)
+    tBtn("export everything", T.GREEN, 14, function()
+        if SS2.exportAll then SS2.exportAll() end
+    end)
+    tBtn("vault manifest", T.TEXT, 15, function()
+        if SS2.vaultManifest then SS2.vaultManifest() end
+    end)
+    tBtn("caller attribution file", T.TEXT, 16, function()
+        if SS2.exportCallersFull then SS2.exportCallersFull() end
+    end)
+    tBtn("closure graph file", T.TEXT, 17, function()
+        if SS2.exportClosures then SS2.exportClosures() end
+    end)
+    tBtn("session summary (console)", T.DIM, 18, function()
+        if SS2.vaultSummary then print(SS2.vaultSummary()) end
+    end)
+
+    tSection("HEALTH", 20)
+    tBtn("capture health report", T.TEXT, 21, function()
+        if SS2.healthReport then SS2.healthReport() end
+    end)
+    tBtn("game vocabulary (console)", T.TEXT, 22, function()
+        if SS2.decomp and SS2.decomp.topConstants then SS2.decomp.topConstants(30) end
+    end)
+
+    tSection("STEALTH", 24)
+    tBtn("stealth on / off", T.RED, 25, function()
+        if SS2.stealth and SS2.stealth.active then
+            SS2.stealthOff()
+        else
+            SS2.stealthOn()
+        end
+    end)
+    tBtn("self-scan (exposure audit)", T.DIM, 26, function()
+        if SS2.scanSelf then SS2.scanSelf() end
+    end)
+end
+
+renderers = { renderCalls, renderRemotes, renderDecompiler, renderTools }
+
+local function switchTab(i)
+    currentTab = i
+    for j, b in ipairs(tabBtns) do
+        b.BackgroundColor3 = (j == currentTab) and T.HI or T.CARD
+        b.TextColor3 = (j == currentTab) and T.TEXT or T.DIM
+    end
+    grepBox.Visible = (i == 1)
+    if renderers[i] then renderers[i](true) end
+end
+
+-- build tab buttons AFTER switchTab exists
+for i, name in ipairs(TABS) do
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.fromOffset(86, 22)
+    b.Position = UDim2.fromOffset(6 + (i - 1) * 90, 3)
+    b.BackgroundColor3 = T.CARD
+    b.Font = Enum.Font.GothamMedium
+    b.TextSize = 11
+    b.TextColor3 = (i == 1) and T.TEXT or T.DIM
+    b.Text = name
+    addCorner(b)
+    b.Parent = tabStrip
+    b.MouseButton1Click:Connect(function()
+        switchTab(i)
+    end)
+    tabBtns[i] = b
+end
+
+grepBox:GetPropertyChangedSignal("Text"):Connect(function()
+    if currentTab == 1 then renderCalls(true) end
+end)
+
+-- refresh loop (differential + selection-lock respected)
+task.spawn(function()
+    while gui.Parent do
+        if currentTab == 1 and not lockedCallId and pinned and not minimized then
+            pcall(renderCalls)
+        end
+        local rc = 0
+        for _ in pairs(SS2.remotes) do rc = rc + 1 end
+        status.Text = ("  %d remotes · %d calls · %.0f c/s · net:%s · %s"):format(
+            rc, #SS2.log,
+            SS2.health and SS2.health.callsEMA or 0,
+            tostring(SS2.metaHooked),
+            lockedCallId and "LOCKED" or (pinned and "LIVE" or ""))
+        task.wait(2)
+    end
+end)
+
+switchTab(1)
+
+SS2.gui = gui
+print("[SS2-ui] v4.8 LIVE — zero forward references, strict order, no errors")
