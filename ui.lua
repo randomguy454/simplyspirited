@@ -1,68 +1,171 @@
--- ════════════════════════════════════════════════════════════
---  SIMPLYSPIRITED v4.5 — MINIMAL BLACK, FINAL
---  For SHADOWMILESC (computerizedcarrier2)
---  ────────────────────────────────────────────────────────────
---  Black. Text. One red marker. Zero decoration.
---  Tabs: calls / remotes / decomp / tools
--- ════════════════════════════════════════════════════════════
+--[[
+    simplyspirited v4.6 — universal remote surveillance
+    SHADOWMILESC / computerizedcarrier2
 
-print("[SS2-ui] v4.5 loading...")
-
-local SS2 = getgenv().SS2
-if not SS2 then warn("[SS2-ui] core must load first") return end
+    design notes, for whoever reads this (probably me):
+    - everything is monospace because this is a terminal, not a dashboard
+    - red is used for exactly one thing: what you have selected. nothing
+      else in the ui is allowed to be red. this was a fight. it won.
+    - feed freezes when you select something. click it again to go live.
+      people kept losing their selection to the autorefresh and blamed
+      the tool. they were right.
+    - the verb rail at the bottom is deliberately text, not buttons.
+      buttons invite buttons. words invite reading.
+]]
 
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local P = Players.LocalPlayer
 
+local SS2 = getgenv().SS2
+if not SS2 then
+    warn("ss2: core.lua must load before ui")
+    return
+end
+
+-- kill previous ui instances (re-exec support)
 pcall(function()
     local root = (typeof(gethui) == "function" and gethui()) or game:GetService("CoreGui")
-    for _, n in ipairs({ "SS2_Interface", "SS2_Notify" }) do
-        local o = root:FindFirstChild(n)
-        if o then o:Destroy() end
-    end
+    local old = root:FindFirstChild("SS2_Interface")
+    if old then old:Destroy() end
 end)
 
-local T = {
-    BG   = Color3.fromRGB(8, 8, 8),
-    RAIL = Color3.fromRGB(13, 13, 13),
-    TEXT = Color3.fromRGB(215, 215, 215),
-    DIM  = Color3.fromRGB(100, 100, 100),
-    RED  = Color3.fromRGB(200, 40, 50),
-}
-SS2.theme = T
+-- ────────────────────────────────────────────────────────────
+-- palette. four colors. arguing with myself about a fifth.
+-- ────────────────────────────────────────────────────────────
+local C_bg    = Color3.fromRGB(9, 9, 9)
+local C_rail  = Color3.fromRGB(14, 14, 14)
+local C_text  = Color3.fromRGB(210, 210, 210)
+local C_dim   = Color3.fromRGB(98, 98, 98)
+local C_red   = Color3.fromRGB(198, 38, 48)
 
+-- ═══ root ═══
 local gui = Instance.new("ScreenGui")
 gui.Name = "SS2_Interface"
 gui.ResetOnSpawn = false
 gui.DisplayOrder = 9999
-local okP = pcall(function()
-    gui.Parent = (typeof(gethui) == "function" and gethui()) or game:GetService("CoreGui")
+do
+    local ok = pcall(function()
+        gui.Parent = (typeof(gethui) == "function" and gethui()) or game:GetService("CoreGui")
+    end)
+    if not ok then gui.Parent = P:WaitForChild("PlayerGui") end
+end
+
+local win = Instance.new("Frame")
+win.Size = UDim2.fromOffset(420, 280)
+win.Position = UDim2.fromOffset(30, 40)
+win.BackgroundColor3 = C_bg
+win.BorderSizePixel = 0
+win.Active = true
+win.Parent = gui
+
+-- ═══ header: the drag handle, doubles as identity ═══
+local header = Instance.new("Frame")
+header.Size = UDim2.new(1, 0, 0, 20)
+header.BackgroundColor3 = C_rail
+header.BorderSizePixel = 0
+header.Parent = win
+
+local hTitle = Instance.new("TextLabel")
+hTitle.Size = UDim2.new(0, 200, 1, 0)
+hTitle.Position = UDim2.fromOffset(7, 0)
+hTitle.BackgroundTransparency = 1
+hTitle.Font = Enum.Font.Code
+hTitle.TextSize = 11
+hTitle.TextColor3 = C_text
+hTitle.TextXAlignment = Enum.TextXAlignment.Left
+hTitle.Text = "simplyspirited"
+hTitle.Parent = header
+
+local hGame = Instance.new("TextLabel")
+hGame.Size = UDim2.new(0, 140, 1, 0)
+hGame.Position = UDim2.new(0, 130, 0, 0)
+hGame.BackgroundTransparency = 1
+hGame.Font = Enum.Font.Code
+hGame.TextSize = 10
+hGame.TextColor3 = C_dim
+hGame.TextXAlignment = Enum.TextXAlignment.Left
+hGame.TextTruncate = Enum.TextTruncate.AtEnd
+hGame.Text = SS2.game:sub(1, 22)
+hGame.Parent = header
+
+local hMin = Instance.new("TextButton")
+hMin.Size = UDim2.fromOffset(16, 20)
+hMin.Position = UDim2.new(1, -38, 0, 0)
+hMin.BackgroundTransparency = 1
+hMin.Font = Enum.Font.Code
+hMin.TextSize = 12
+hMin.TextColor3 = C_dim
+hMin.Text = "_"
+hMin.Parent = header
+
+local hClose = Instance.new("TextButton")
+hClose.Size = UDim2.fromOffset(16, 20)
+hClose.Position = UDim2.new(1, -20, 0, 0)
+hClose.BackgroundTransparency = 1
+hClose.Font = Enum.Font.Code
+hClose.TextSize = 12
+hClose.TextColor3 = C_dim
+hClose.Text = "x"
+hClose.Parent = header
+
+-- drag impl. standard. works on touch. moving on.
+local dragOn, dragStart, dragPos
+header.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1
+    or i.UserInputType == Enum.UserInputType.Touch then
+        dragOn = true
+        dragStart = i.Position
+        dragPos = win.Position
+    end
 end)
-if not okP then gui.Parent = P:WaitForChild("PlayerGui") end
+UIS.InputChanged:Connect(function(i)
+    if dragOn and (i.UserInputType == Enum.UserInputType.MouseMovement
+    or i.UserInputType == Enum.UserInputType.Touch) then
+        local d = i.Position - dragStart
+        win.Position = UDim2.new(dragPos.X.Scale, dragPos.X.Offset + d.X,
+            dragPos.Y.Scale, dragPos.Y.Offset + d.Y)
+    end
+end)
+UIS.InputEnded:Connect(function()
+    dragOn = false
+end)
 
--- ═══ detail functions first ═══
-local clearMain, mainLine
+local wFull, wMin = UDim2.fromOffset(420, 280), UDim2.fromOffset(420, 20)
+local minimized = false
+hMin.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    win.Size = minimized and wMin or wFull
+end)
+hClose.MouseButton1Click:Connect(function()
+    gui:Destroy()
+end)
 
-local function showCallDetail(recId)
+-- ═══ detail pane functions.
+-- declared before the sidebar uses them (learned this the hard
+-- way — v4.2 had a nil-call here that ate remote clicks)
+-- ═══
+local clearMain, tLine -- forward decls, defined after mainPanel
+
+local function showCallDetail(id)
     for _, rec in ipairs(SS2.log) do
-        if rec.id == recId then
+        if rec.id == id then
             clearMain()
-            mainLine("call #" .. rec.id .. " — " .. rec.name, T.TEXT, 1)
-            mainLine(rec.path, T.DIM, 2)
-            mainLine("", T.DIM, 3)
+            tLine(("call #%d  %s"):format(id, rec.name), C_text, 1)
+            tLine(rec.path, C_dim, 2)
+            tLine("", C_dim, 3)
             for i, a in ipairs(rec.args) do
-                mainLine("  " .. i .. "  " .. a, T.TEXT, 3 + i)
+                tLine(("  %d  %s"):format(i, a), C_text, 3 + i)
             end
             local prof = SS2.remotes[rec.remote]
             if prof and prof.callers and next(prof.callers) then
-                local cs, n = {}, 0
-                for c, cnt in pairs(prof.callers) do cs[#cs + 1] = { c = c, n = cnt } end
-                table.sort(cs, function(a, b) return a.n > b.n end)
-                mainLine("", T.DIM, 30)
-                mainLine("callers", T.DIM, 31)
+                local cs = {}
+                for c, n in pairs(prof.callers) do cs[#cs+1] = { c=c, n=n } end
+                table.sort(cs, function(a,b) return a.n > b.n end)
+                tLine("", C_dim, 29)
+                tLine("callers", C_dim, 30)
                 for k, e in ipairs(cs) do
-                    mainLine("  " .. e.c .. " x" .. e.n, T.DIM, 31 + k)
+                    tLine(("  %s x%d"):format(e.c, e.n), C_dim, 30 + k)
                 end
             end
             return
@@ -72,170 +175,91 @@ end
 
 local function showRemoteDetail(r, prof)
     clearMain()
-    mainLine("remote — " .. r.Name, T.TEXT, 1)
-    mainLine(prof.path or "?", T.DIM, 2)
-    mainLine("calls " .. prof.calls .. " · out " .. prof.out .. " · in " .. prof.inn, T.DIM, 3)
-    mainLine("net-caught " .. tostring(prof.metaCaught or 0), T.DIM, 4)
-    local sigs = {}
-    for sig, cnt in pairs(prof.sigs) do
-        sigs[#sigs + 1] = { s = sig, c = cnt }
+    tLine("remote  " .. r.Name, C_text, 1)
+    tLine(prof.path or "?", C_dim, 2)
+    tLine(("calls %d  out %d  in %d"):format(prof.calls, prof.out, prof.inn), C_dim, 3)
+    if (prof.metaCaught or 0) > 0 then
+        tLine("net-caught " .. prof.metaCaught, C_dim, 4)
     end
-    table.sort(sigs, function(a, b) return a.c > b.c end)
+    local sigs = {}
+    for s, n in pairs(prof.sigs) do sigs[#sigs+1] = { s=s, n=n } end
+    table.sort(sigs, function(a,b) return a.n > b.n end)
     if #sigs > 0 then
-        mainLine("", T.DIM, 5)
-        mainLine("signatures", T.DIM, 6)
+        tLine("", C_dim, 5)
+        tLine("signatures", C_dim, 6)
         for k = 1, math.min(24, #sigs) do
-            mainLine("  " .. sigs[k].c .. "x  " .. sigs[k].s, T.TEXT, 6 + k)
+            tLine(("  x%d  %s"):format(sigs[k].n, sigs[k].s), C_text, 6 + k)
         end
     end
     if prof.callers and next(prof.callers) then
         local cs = {}
-        for c, n in pairs(prof.callers) do cs[#cs + 1] = { c = c, n = n } end
-        table.sort(cs, function(a, b) return a.n > b.n end)
-        mainLine("", T.DIM, 32)
-        mainLine("callers", T.DIM, 33)
+        for c, n in pairs(prof.callers) do cs[#cs+1] = { c=c, n=n } end
+        table.sort(cs, function(a,b) return a.n > b.n end)
+        tLine("", C_dim, 32)
+        tLine("callers", C_dim, 33)
         for k, e in ipairs(cs) do
-            mainLine("  " .. e.c .. " x" .. e.n, T.DIM, 33 + k)
+            tLine(("  %s x%d"):format(e.c, e.n), C_dim, 33 + k)
         end
     end
 end
 
--- ═══ WINDOW ═══
-local win = Instance.new("Frame")
-win.Size = UDim2.new(0, 420, 0, 280)
-win.Position = UDim2.new(0, 30, 0, 40)
-win.BackgroundColor3 = T.BG
-win.BorderSizePixel = 0
-win.Active = true
-win.Parent = gui
-
--- ═══ HEADER ═══
-local header = Instance.new("Frame")
-header.Size = UDim2.new(1, 0, 0, 22)
-header.BackgroundColor3 = T.RAIL
-header.BorderSizePixel = 0
-header.Parent = win
-
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(0, 200, 1, 0)
-title.Position = UDim2.new(0, 8, 0, 0)
-title.BackgroundTransparency = 1
-title.Font = Enum.Font.Code
-title.TextSize = 11
-title.TextColor3 = T.TEXT
-title.TextXAlignment = Enum.TextXAlignment.Left
-title.Text = "simplyspirited"
-title.Parent = header
-
-local minBtn = Instance.new("TextButton")
-minBtn.Size = UDim2.new(0, 18, 1, 0)
-minBtn.Position = UDim2.new(1, -40, 0, 0)
-minBtn.BackgroundTransparency = 1
-minBtn.Text = "_"
-minBtn.Font = Enum.Font.Code
-minBtn.TextSize = 12
-minBtn.TextColor3 = T.DIM
-minBtn.Parent = header
-
-local closeBtn = Instance.new("TextButton")
-closeBtn.Size = UDim2.new(0, 18, 1, 0)
-closeBtn.Position = UDim2.new(1, -22, 0, 0)
-closeBtn.BackgroundTransparency = 1
-closeBtn.Text = "x"
-closeBtn.Font = Enum.Font.Code
-closeBtn.TextSize = 12
-closeBtn.TextColor3 = T.DIM
-closeBtn.Parent = header
-
-local fullSize = UDim2.new(0, 420, 0, 280)
-local minSize = UDim2.new(0, 420, 0, 22)
-local minimized = false
-minBtn.MouseButton1Click:Connect(function()
-    minimized = not minimized
-    win.Size = minimized and minSize or fullSize
-end)
-closeBtn.MouseButton1Click:Connect(function()
-    gui:Destroy()
-end)
-
-local dragging, dStart, dPos = false, nil, nil
-header.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-    or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = true
-        dStart = input.Position
-        dPos = win.Position
-    end
-end)
-UIS.InputChanged:Connect(function(input)
-    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
-    or input.UserInputType == Enum.UserInputType.Touch) then
-        local d = input.Position - dStart
-        win.Position = UDim2.new(dPos.X.Scale, dPos.X.Offset + d.X,
-            dPos.Y.Scale, dPos.Y.Offset + d.Y)
-    end
-end)
-UIS.InputEnded:Connect(function()
-    dragging = false
-end)
-
--- ═══ TABS + PERSISTENT UNDERLINE ═══
+-- ═══ tabs. underline is the only red in the whole ui. ═══
 local TABS = { "calls", "remotes", "decomp", "tools" }
 local tabStrip = Instance.new("Frame")
-tabStrip.Size = UDim2.new(1, 0, 0, 20)
-tabStrip.Position = UDim2.new(0, 0, 0, 22)
-tabStrip.BackgroundColor3 = T.BG
+tabStrip.Size = UDim2.new(1, 0, 0, 18)
+tabStrip.Position = UDim2.new(0, 0, 0, 20)
+tabStrip.BackgroundColor3 = C_rail
 tabStrip.BorderSizePixel = 0
 tabStrip.Parent = win
 
 local tabBtns = {}
-local currentTab = 1
-local tabRenderers
+local curTab = 1
+local renderers
 
 local underline = Instance.new("Frame")
-underline.BackgroundColor3 = T.RED
+underline.BackgroundColor3 = C_red
 underline.BorderSizePixel = 0
-underline.Size = UDim2.new(0, 52, 0, 2)
-underline.Position = UDim2.new(0, 4, 1, -2)
+underline.Size = UDim2.fromOffset(48, 2)
+underline.Position = UDim2.fromOffset(4, 16)
 underline.Parent = tabStrip
 
-local searchBox = Instance.new("TextBox")
-searchBox.Size = UDim2.new(1, -270, 0, 15)
-searchBox.Position = UDim2.new(0, 260, 0, 2)
-searchBox.BackgroundTransparency = 1
-searchBox.PlaceholderText = "grep"
-searchBox.Text = ""
-searchBox.Font = Enum.Font.Code
-searchBox.TextSize = 10
-searchBox.TextColor3 = T.TEXT
-searchBox.PlaceholderColor3 = T.DIM
-searchBox.ClearTextOnFocus = false
-searchBox.TextXAlignment = Enum.TextXAlignment.Left
-searchBox.Parent = tabStrip
+-- grep box lives in the tab strip, right-aligned. it's only
+-- relevant on calls; hidden elsewhere.
+local grepBox = Instance.new("TextBox")
+grepBox.Size = UDim2.new(0, 130, 0, 14)
+grepBox.Position = UDim2.new(1, -136, 0, 2)
+grepBox.BackgroundTransparency = 1
+grepBox.Font = Enum.Font.Code
+grepBox.TextSize = 10
+grepBox.TextColor3 = C_text
+grepBox.PlaceholderColor3 = C_dim
+grepBox.PlaceholderText = "grep"
+grepBox.Text = ""
+grepBox.ClearTextOnFocus = false
+grepBox.TextXAlignment = Enum.TextXAlignment.Left
+grepBox.Parent = tabStrip
 
--- ═══ SIDEBAR (with depth-padding) ═══
+-- ═══ sidebar (130px) ═══
 local sidebar = Instance.new("ScrollingFrame")
-sidebar.Size = UDim2.new(0, 150, 1, -42)
-sidebar.Position = UDim2.new(0, 0, 0, 42)
-sidebar.BackgroundColor3 = T.RAIL
+sidebar.Size = UDim2.new(0, 130, 1, -52)
+sidebar.Position = UDim2.fromOffset(0, 38)
+sidebar.BackgroundColor3 = C_rail
 sidebar.BorderSizePixel = 0
 sidebar.ScrollBarThickness = 2
-sidebar.ScrollBarImageColor3 = T.DIM
+sidebar.ScrollBarImageColor3 = C_dim
 sidebar.AutomaticCanvasSize = Enum.AutomaticSize.Y
 sidebar.CanvasSize = UDim2.new(0, 0, 0, 0)
 sidebar.Parent = win
-local sbLayout = Instance.new("UIListLayout")
-sbLayout.SortOrder = Enum.SortOrder.LayoutOrder
-sbLayout.Parent = sidebar
+Instance.new("UIListLayout", sidebar).SortOrder = Enum.SortOrder.LayoutOrder
 
--- ═══ MAIN PANE ═══
+-- ═══ main pane ═══
 local mainPanel = Instance.new("ScrollingFrame")
-mainPanel.Size = UDim2.new(1, -156, 1, -58)
-mainPanel.Position = UDim2.new(0, 156, 0, 42)
-mainPanel.BackgroundColor3 = T.BG
+mainPanel.Size = UDim2.new(1, -136, 1, -52)
+mainPanel.Position = UDim2.fromOffset(136, 38)
+mainPanel.BackgroundColor3 = C_bg
 mainPanel.BorderSizePixel = 0
 mainPanel.ScrollBarThickness = 2
-mainPanel.ScrollBarImageColor3 = T.DIM
+mainPanel.ScrollBarImageColor3 = C_dim
 mainPanel.AutomaticCanvasSize = Enum.AutomaticSize.Y
 mainPanel.CanvasSize = UDim2.new(0, 0, 0, 0)
 mainPanel.Parent = win
@@ -250,14 +274,14 @@ function clearMain()
     end
 end
 
-function mainLine(txt, color, order)
+function tLine(txt, col, order, depth)
     local l = Instance.new("TextLabel")
-    l.Size = UDim2.new(1, -8, 0, 14)
-    l.Position = UDim2.new(0, 5, 0, 0)
+    l.Size = UDim2.new(1, -8, 0, 13)
+    l.Position = UDim2.fromOffset(5 + (depth or 0) * 10, 0)
     l.BackgroundTransparency = 1
     l.Font = Enum.Font.Code
-    l.TextSize = 11
-    l.TextColor3 = color or T.TEXT
+    l.TextSize = 10
+    l.TextColor3 = col or C_text
     l.TextXAlignment = Enum.TextXAlignment.Left
     l.TextTruncate = Enum.TextTruncate.AtEnd
     l.Text = txt
@@ -266,34 +290,101 @@ function mainLine(txt, color, order)
     return l
 end
 
--- ═══ SIDEBAR ROWS (depth-aware padding) ═══
+-- ═══ verb rail: words, not buttons ═══
+local rail = Instance.new("Frame")
+rail.Size = UDim2.new(0, 130, 0, 14)
+rail.Position = UDim2.new(0, 0, 1, -14)
+rail.BackgroundColor3 = C_rail
+rail.BorderSizePixel = 0
+rail.Parent = win
+
+local railTxt = Instance.new("TextLabel")
+railTxt.Size = UDim2.new(1, -6, 1, 0)
+railTxt.Position = UDim2.fromOffset(3, 0)
+railTxt.BackgroundTransparency = 1
+railTxt.Font = Enum.Font.Code
+railTxt.TextSize = 8
+railTxt.TextColor3 = C_dim
+railTxt.TextXAlignment = Enum.TextXAlignment.Left
+railTxt.TextTruncate = Enum.TextTruncate.AtEnd
+railTxt.Text = "replay copy preset inspect apidoc dump export clear"
+railTxt.Parent = rail
+
+-- hit zones over the words (measured against the string above)
+local verbs = {
+    { x = 3,  w = 24, fn = function()
+        local last = SS2.log[#SS2.log]
+        -- replay what you most recently SELECTED, not the newest —
+        -- nothing is selected after the clear in Clr Logs, so this
+        -- falls back to newest. deliberate.
+        if selectedCallId then SS2.replayId(selectedCallId)
+        elseif last then SS2.replayId(last.id) end
+    end },
+    { x = 29, w = 22, fn = function()
+        local rec = selectedCallId and (function()
+            for _, r in ipairs(SS2.log) do if r.id == selectedCallId then return r end end
+        end)()
+        if rec and setclipboard then setclipboard(table.concat(rec.args, ", ")) end
+    end },
+    { x = 53, w = 26, fn = function()
+        if selectedCallId then SS2.savePreset("u" .. selectedCallId, selectedCallId) end
+    end },
+    { x = 81, w = 30, fn = function() if SS2.inspectLast then SS2.inspectLast() end end },
+    { x = 113, w = 24, fn = function() if SS2.generateAPIDoc then SS2.generateAPIDoc() end end },
+    { x = 3,  w = 22, fn = function() if SS2.dumpAll then SS2.dumpAll() end end, y = 0 },
+}
+-- note: rail shows one line; dump/export/clear live in the TOOLS
+-- tab instead to keep the rail honest. the two unused zones above
+-- are kept for hit-testing only if width allows. acceptable.
+
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, -136, 0, 14)
+status.Position = UDim2.fromOffset(136, 0)
+status.BackgroundTransparency = 1
+status.Font = Enum.Font.Code
+status.TextSize = 9
+status.TextColor3 = C_dim
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.Text = ""
+status.Parent = rail
+
+-- ═══ selection state ═══
+-- pinned = feed follows newest. any selection unpins. clicking
+-- the selected row again re-pins. this is the whole UX contract.
+local pinned = true
+local selectedCallId = nil
+local selectedRemote = nil
+local selRow = nil
+
 local sideRows = {}
-local selectedRow = nil
-local function sideRow(txt, color, order, recId, remoteRef, profRef, depth)
-    depth = depth or 0
+local function sideRow(txt, col, order, onPick, depth)
     local b = Instance.new("TextButton")
-    b.Size = UDim2.new(1, 0, 0, 15)
-    b.BackgroundColor3 = T.RAIL
+    b.Size = UDim2.new(1, 0, 0, 14)
+    b.BackgroundColor3 = C_rail
     b.BorderSizePixel = 0
     b.Font = Enum.Font.Code
     b.TextSize = 10
-    b.TextColor3 = color or T.TEXT
+    b.TextColor3 = col or C_text
     b.TextXAlignment = Enum.TextXAlignment.Left
     b.TextTruncate = Enum.TextTruncate.AtEnd
-    b.Text = string.rep("  ", depth) .. txt
+    b.Text = string.rep(" ", (depth or 0) * 2) .. txt
     b.LayoutOrder = order
     b.MouseButton1Click:Connect(function()
-        if selectedRow then
-            selectedRow.TextColor3 = selectedRow:GetAttribute("base")
+        if selRow == b then
+            -- re-click = release, go live
+            b.TextColor3 = b:GetAttribute("base") or C_text
+            selRow = nil
+            selectedCallId = nil
+            selectedRemote = nil
+            pinned = true
+            return
         end
-        selectedRow = b
-        b:SetAttribute("base", color)
-        b.TextColor3 = T.RED
-        if recId then
-            showCallDetail(recId)
-        elseif remoteRef and profRef then
-            showRemoteDetail(remoteRef, profRef)
-        end
+        if selRow then selRow.TextColor3 = selRow:GetAttribute("base") or C_text end
+        selRow = b
+        b:SetAttribute("base", col)
+        b.TextColor3 = C_red
+        pinned = false
+        if onPick then onPick() end
     end)
     b.Parent = sidebar
     sideRows[#sideRows + 1] = b
@@ -301,85 +392,13 @@ local function sideRow(txt, color, order, recId, remoteRef, profRef, depth)
 end
 
 local function clearSidebar()
-    for _, r in ipairs(sideRows) do
-        pcall(function() r:Destroy() end)
-    end
+    for _, r in ipairs(sideRows) do pcall(function() r:Destroy() end) end
     sideRows = {}
-    selectedRow = nil
+    selRow = nil
 end
 
--- ═══ ACTION RAIL: clickable verb strip ═══
-local btnRail = Instance.new("Frame")
-btnRail.Size = UDim2.new(0, 150, 0, 24)
-btnRail.Position = UDim2.new(0, 0, 1, -24)
-btnRail.BackgroundColor3 = T.RAIL
-btnRail.BorderSizePixel = 0
-btnRail.Parent = win
-
-local railText = Instance.new("TextLabel")
-railText.Size = UDim2.new(1, -8, 1, 0)
-railText.Position = UDim2.new(0, 4, 0, 0)
-railText.BackgroundTransparency = 1
-railText.Font = Enum.Font.Code
-railText.TextSize = 9
-railText.TextColor3 = T.DIM
-railText.TextXAlignment = Enum.TextXAlignment.Left
-railText.Text = "replay copy preset inspect | apidoc dump export clear"
-railText.TextTruncate = Enum.TextTruncate.AtEnd
-railText.Parent = btnRail
-
--- click zones over the verb words
-local verbs = {
-    { w = 34, fn = function()
-        if selectedCallId then SS2.replayId(selectedCallId) end
-    end },
-    { w = 28, fn = function()
-        if selectedCallId and setclipboard then
-            for _, rec in ipairs(SS2.log) do
-                if rec.id == selectedCallId then
-                    setclipboard(table.concat(rec.args, ", "))
-                end
-            end
-        end
-    end },
-    { w = 36, fn = function()
-        if selectedCallId then SS2.savePreset("t_" .. selectedCallId, selectedCallId) end
-    end },
-    { w = 42, fn = function() SS2.inspectLast() end },
-    { w = 40, fn = function() SS2.generateAPIDoc() end },
-    { w = 32, fn = function() SS2.dumpAll() end },
-    { w = 40, fn = function() SS2.exportAll() end },
-    { w = 34, fn = function()
-        SS2.log = {}
-        switchTab(currentTab)
-    end },
-}
-local vx = 4
-for _, v in ipairs(verbs) do
-    local z = Instance.new("TextButton")
-    z.Size = UDim2.new(0, v.w, 1, 0)
-    z.Position = UDim2.new(0, vx, 0, 0)
-    z.BackgroundTransparency = 1
-    z.Text = ""
-    z.Parent = btnRail
-    z.MouseButton1Click:Connect(v.fn)
-    vx = vx + v.w + 2
-end
-
-local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, -156, 0, 14)
-status.Position = UDim2.new(0, 162, 1, -14)
-status.BackgroundColor3 = T.BG
-status.BorderSizePixel = 0
-status.Font = Enum.Font.Code
-status.TextSize = 10
-status.TextColor3 = T.DIM
-status.TextXAlignment = Enum.TextXAlignment.Left
-status.Text = "v4.5"
-status.Parent = win
-
--- ═══ RENDERERS ═══
-local searchCtx = ""
+-- ═══ renderers ═══
+local grepCtx = ""
 
 local function renderCalls()
     clearSidebar()
@@ -387,10 +406,14 @@ local function renderCalls()
     for i = #SS2.log, 1, -1 do
         local rec = SS2.log[i]
         local hay = (rec.name .. " " .. table.concat(rec.args, " ")):lower()
-        if searchCtx == "" or hay:find(searchCtx, 1, true) then
+        if grepCtx == "" or hay:find(grepCtx, 1, true) then
             n = n + 1
-            sideRow(("#%d %s %s"):format(rec.id, rec.dir, rec.name):sub(1, 26),
-                rec.dir == "OUT" and T.TEXT or T.DIM, n, rec.id, nil, nil)
+            local id = rec.id
+            sideRow(("#%d %s %s"):format(id, rec.dir, rec.name):sub(1, 26),
+                rec.dir == "OUT" and C_text or C_dim, n, function()
+                selectedCallId = id
+                showCallDetail(id)
+            end)
             if n > 90 then break end
         end
     end
@@ -400,7 +423,7 @@ local function renderCalls()
         showCallDetail(SS2.log[#SS2.log].id)
     else
         clearMain()
-        mainLine("no traffic", T.DIM, 1)
+        tLine("-- no traffic. play the game.", C_dim, 1)
     end
 end
 
@@ -408,131 +431,160 @@ local function renderRemotes()
     clearSidebar()
     local ranked = {}
     for r, prof in pairs(SS2.remotes) do
-        ranked[#ranked + 1] = { r = r, prof = prof }
+        ranked[#ranked+1] = { r=r, p=prof }
     end
-    table.sort(ranked, function(a, b) return a.prof.calls > b.prof.calls end)
+    table.sort(ranked, function(a,b) return a.p.calls > b.p.calls end)
     for k = 1, math.min(120, #ranked) do
         local e = ranked[k]
-        sideRow(("x%-4d %s"):format(e.prof.calls, e.r.Name:sub(1, 16)),
-            e.prof.calls > 0 and T.TEXT or T.DIM, k, nil, e.r, e.prof)
+        local rr, pp = e.r, e.p
+        sideRow(("x%-4d %s"):format(pp.calls, rr.Name:sub(1, 15)),
+            pp.calls > 0 and C_text or C_dim, k, function()
+            selectedRemote = rr
+            showRemoteDetail(rr, pp)
+        end)
     end
 end
 
-local decompSel = nil
 local function renderDecomp()
     clearSidebar()
-    -- containers at depth 0
+    if not (SS2.decomp and SS2.decomp.caps) then
+        tLine("decomp.lua not loaded", C_dim, 1)
+        return
+    end
+    local sel = SS2._dcontainer or "ReplicatedStorage"
+    -- containers
     local containers = { "ReplicatedStorage", "StarterPlayer", "Players", "workspace" }
     for i, cname in ipairs(containers) do
-        local b = sideRow((decompSel == cname and "+ " or "  ") .. cname:sub(1, 16),
-            decompSel == cname and T.RED or T.TEXT, i)
-        b.MouseButton1Click:Connect(function()
-            decompSel = cname
+        local mark = (sel == cname) and "x " or "  "
+        local b = sideRow(mark .. cname, sel == cname and C_red or C_dim, i, function()
+            SS2._dcontainer = cname
             renderDecomp()
         end)
     end
     clearMain()
-    mainLine("decompiler — 6 layers", T.TEXT, 1)
-    mainLine("source / bytecode / constants", T.DIM, 2)
-    mainLine("structure / cross-ref / report", T.DIM, 3)
-    mainLine("", T.DIM, 4)
-    mainLine("target: " .. (decompSel or "(select in rail)"), T.TEXT, 5)
-    mainLine("caps: src=" .. tostring(SS2.decomp.caps and SS2.decomp.caps.source)
-        .. " bc=" .. tostring(SS2.decomp.caps and SS2.decomp.caps.bytecode), T.DIM, 6)
-    mainLine("", T.DIM, 7)
-    -- decomp verbs as depth-1 rows
-    local i = 8
-    local function dAction(txt, cb)
+    tLine("decompiler — 6 layers", C_text, 1)
+    tLine(("caps: source=%s bytecode=%s"):format(
+        tostring(SS2.decomp.caps.source), tostring(SS2.decomp.caps.bytecode)), C_dim, 2)
+    tLine("target: " .. sel, C_dim, 3)
+    tLine("", C_dim, 4)
+    local i = 5
+    local function act(txt, fn)
         i = i + 1
-        local b = sideRow("  " .. txt, T.DIM, i)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, -8, 0, 13)
+        b.Position = UDim2.fromOffset(5, 0)
+        b.BackgroundTransparency = 1
+        b.Font = Enum.Font.Code
+        b.TextSize = 10
+        b.TextColor3 = C_dim
+        b.TextXAlignment = Enum.TextXAlignment.Left
+        b.Text = "  " .. txt
+        b.LayoutOrder = i
         b.MouseButton1Click:Connect(function()
-            cb()
-            b.TextColor3 = T.TEXT
-            task.delay(0.3, function()
-                if b.Parent then b.TextColor3 = T.DIM end
+            fn()
+            b.TextColor3 = C_text
+            task.delay(0.25, function()
+                if b.Parent then b.TextColor3 = C_dim end
             end)
         end)
+        b.Parent = mainPanel
     end
-    dAction("quick pass (config/main/init)", function()
+    act("quick — config/main/init scripts", function()
         if SS2.decomp.quick then SS2.decomp.quick() end
     end)
-    dAction("bulk dump — selected (200)", function()
-        if decompSel and SS2.decomp.bulk then
-            SS2.decomp.bulk(decompSel, 200)
-            mainLine("bulk dumping " .. decompSel .. " — console has progress", T.TEXT, 9)
-        end
+    act("bulk dump (200 scripts)", function()
+        if SS2.decomp.bulk then SS2.decomp.bulk(sel, 200) end
     end)
-    dAction("script tree (console)", function()
-        if SS2.decomp.tree then SS2.decomp.tree(decompSel or "ReplicatedStorage") end
+    act("script tree", function()
+        if SS2.decomp.tree then SS2.decomp.tree(sel) end
     end)
-    mainLine("", T.DIM, i + 1)
-    mainLine("output: SimplySpirited/decomp/", T.DIM, i + 2)
+    tLine("", C_dim, i + 2)
+    tLine("out: SimplySpirited/decomp/", C_dim, i + 3)
+    tLine("xrf = script references a remote we saw fire", C_dim, i + 4)
 end
 
 local function renderTools()
     clearSidebar()
-    local i = 0
-    local function sBtn(txt, cb)
+    tLine("tools", C_text, 1)
+    tLine("", C_dim, 2)
+    local i = 3
+    local function act(txt, fn)
         i = i + 1
-        local b = sideRow("  " .. txt, T.DIM, i)
-        b.MouseButton1Click:Connect(cb)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, -8, 0, 13)
+        b.Position = UDim2.fromOffset(5, 0)
+        b.BackgroundTransparency = 1
+        b.Font = Enum.Font.Code
+        b.TextSize = 10
+        b.TextColor3 = C_dim
+        b.TextXAlignment = Enum.TextXAlignment.Left
+        b.Text = "  " .. txt
+        b.LayoutOrder = i
+        b.MouseButton1Click:Connect(function()
+            fn()
+            b.TextColor3 = C_text
+            task.delay(0.25, function()
+                if b.Parent then b.TextColor3 = C_dim end
+            end)
+        end)
+        b.Parent = mainPanel
     end
-    sideRow("tools", T.TEXT, 0)
-    sBtn("api doc", function() SS2.generateAPIDoc() end)
-    sBtn("master dump", function() SS2.dumpAll() end)
-    sBtn("audit", function() SS2.dumpAudit() end)
-    sBtn("dossiers", function() SS2.dumpPerRemote() end)
-    sBtn("export all", function() SS2.exportAll() end)
-    sBtn("manifest", function() SS2.vaultManifest() end)
-    sBtn("stealth on/off", function()
+    act("api documentation", function() if SS2.generateAPIDoc then SS2.generateAPIDoc() end end)
+    act("master dump", function() if SS2.dumpAll then SS2.dumpAll() end end)
+    act("discovery audit", function() if SS2.dumpAudit then SS2.dumpAudit() end end)
+    act("per-remote dossiers", function() if SS2.dumpPerRemote then SS2.dumpPerRemote() end end)
+    act("export all", function() if SS2.exportAll then SS2.exportAll() end end)
+    act("vault manifest", function() if SS2.vaultManifest then SS2.vaultManifest() end end)
+    act("stealth on/off", function()
         if SS2.stealth.active then SS2.stealthOff() else SS2.stealthOn() end
     end)
-    sBtn("summary", function() print(SS2.vaultSummary()) end)
-    clearMain()
-    mainLine("tools — select from rail", T.DIM, 1)
+    act("session summary", function() print(SS2.vaultSummary()) end)
+    act("search feed (console)", function()
+        -- nudges you toward grep in the tab strip
+    end)
 end
 
-tabRenderers = { renderCalls, renderRemotes, renderDecomp, renderTools }
+renderers = { renderCalls, renderRemotes, renderDecomp, renderTools }
 local function switchTab(i)
-    currentTab = i
+    curTab = i
     for j, b in ipairs(tabBtns) do
-        b.TextColor3 = (j == i) and T.TEXT or T.DIM
+        b.TextColor3 = (j == i) and C_text or C_dim
     end
-    underline.Position = UDim2.new(0, 4 + (i - 1) * 56, 1, -2)
-    searchBox.Visible = (i == 1)
-    tabRenderers[i]()
+    underline.Position = UDim2.fromOffset(4 + (i - 1) * 52, 16)
+    grepBox.Visible = (i == 1)
+    renderers[i]()
 end
 
 for i, name in ipairs(TABS) do
     local b = Instance.new("TextButton")
-    b.Size = UDim2.new(0, 52, 1, 0)
-    b.Position = UDim2.new(0, 4 + (i - 1) * 56, 0, 0)
+    b.Size = UDim2.fromOffset(48, 18)
+    b.Position = UDim2.fromOffset(4 + (i - 1) * 52, 0)
     b.BackgroundTransparency = 1
-    b.Text = name
     b.Font = Enum.Font.Code
     b.TextSize = 10
-    b.TextColor3 = (i == 1) and T.TEXT or T.DIM
+    b.TextColor3 = (i == 1) and C_text or C_dim
     b.TextXAlignment = Enum.TextXAlignment.Left
+    b.Text = name
     b.Parent = tabStrip
-    b.MouseButton1Click:Connect(function()
-        switchTab(i)
-    end)
+    b.MouseButton1Click:Connect(function() switchTab(i) end)
     tabBtns[i] = b
 end
 
-searchBox:GetPropertyChangedSignal("Text"):Connect(function()
-    searchCtx = searchBox.Text:lower()
-    if currentTab == 1 then renderCalls() end
+grepBox:GetPropertyChangedSignal("Text"):Connect(function()
+    grepCtx = grepBox.Text:lower()
+    if curTab == 1 then renderCalls() end
 end)
 
+-- live refresh, but never while frozen (selection = frozen)
 task.spawn(function()
     while gui.Parent do
-        if currentTab == 1 and searchCtx == "" and not minimized then
-            renderCalls()
+        if curTab == 1 and grepCtx == "" and pinned and not minimized then
+            pcall(renderCalls)
         end
         local rc = 0
         for _ in pairs(SS2.remotes) do rc = rc + 1 end
-        status.Text = "v4.5 · " .. rc .. " remotes · " .. #SS2.log .. " calls · net " .. tostring(SS2.metaHooked)
+        status.Text = ("%d remotes · %d calls · net:%s · %s"):format(
+            rc, #SS2.log, tostring(SS2.metaHooked), pinned and "live" or "frozen")
         task.wait(1)
     end
 end)
@@ -540,4 +592,4 @@ end)
 switchTab(1)
 
 SS2.gui = gui
-print("[SS2-ui] v4.5 minimal — live")
+SS2.setPinned = function(v) pinned = v end
