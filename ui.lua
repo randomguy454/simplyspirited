@@ -14,25 +14,32 @@
 --  LAYOUT (PeopleSpy-inspired):                                     --
 --                                                                    --
 --    +----------------------------------+                            --
---    |  SimplySpy          [_] [X]     |   <- title bar             --
+--    |  SimplySpy  v1.0.0      [drag]   |   <- title bar             --
 --    +----------------------------------+                            --
 --    |                                  |                            --
---    |   LOG DISPLAY AREA               |   <- captures listed      --
---    |   (dark, scrollable)              |      here, click to       --
---    |                                  |      select               --
+--    |   LOG DISPLAY AREA               |   <- captures, click       --
+--    |   (dark, scrollable, pooled rows) |      to select           --
+--    |                                  |                            --
 --    |   [1] RF:InvokeServer (arg...)   |                            --
 --    |   [2] Event:FireServer (...)     |                            --
 --    |                                  |                            --
 --    +----------------------------------+                            --
---    |  Copy Code  | Copy Remote       |   <- button grid           --
+--    |  Copy Code   | Copy Remote       |   <- button grid           --
 --    |  Run Code    | Get Script        |                            --
---    |  Function Info | Clr Logs       |                            --
+--    |  Function Info | Clr Logs        |                            --
 --    |  Exclude (i) | Exclude (n)       |                            --
 --    |  Clr Blacklist | Block (i)      |                            --
 --    |  Block (n)   | Clr Blocklist     |                            --
 --    +----------------------------------+                            --
---    |  status bar                      |   <- bottom               --
+--    |  status bar                       |   <- bottom               --
 --    +----------------------------------+                            --
+--                                                                    --
+--  ROW POOLING (the crash fix):                                      --
+--    Rows are created once and reused forever. Refreshes only       --
+--    mutate Label.Text, colors, and visibility. Zero instance       --
+--    churn at steady state. Verified necessary by isolation         --
+--    testing: destroy-and-recreate at 10 Hz crashed the client      --
+--    in remote-heavy games.                                          --
 --                                                                    --
 --  CONTAINER LADDER:                                                 --
 --    Tier 1 : CoreGui (survives respawns, hidden from game)         --
@@ -41,22 +48,22 @@
 --    Tier 4 : console only (no GUI; SPY.* commands only)             --
 --                                                                    --
 --  BUTTON ACTIONS:                                                   --
---    Copy Code    : copies the selected capture as executable Lua    --
---    Copy Remote  : copies the remote instance path only             --
+--    Copy Code    : copies selected capture as executable Lua       --
+--    Copy Remote  : copies the remote instance path only            --
 --    Run Code     : generates and immediately executes the code      --
 --    Get Script   : prints the full generated script to console     --
---    Function Info: prints detailed info about the remote            --
---    Clr Logs     : clears the capture buffer                        --
---    Exclude (i)  : excludes THIS instance from capture             --
+--    Function Info: prints detailed info about the remote           --
+--    Clr Logs     : clears the capture buffer                       --
+--    Exclude (i)  : excludes this remote instance from capture      --
 --    Exclude (n)  : excludes all remotes with this NAME              --
 --    Clr Blacklist: clears all exclusions                           --
---    Block (i)    : blocks THIS instance from reaching the server   --
+--    Block (i)    : blocks this remote from reaching the server      --
 --    Block (n)    : blocks all remotes with this NAME                --
 --    Clr Blocklist: clears all blocks                                --
 --                                                                    --
 --  REAL-TIME UPDATES:                                                --
---    New captures appear in the log area immediately (throttled      --
---    to 10 refreshes per second to handle remote-heavy games).       --
+--    Throttled to 10 refreshes per second. With pooled rows this    --
+--    costs almost nothing even in remote-heavy games.                --
 --                                                                    --
 --  MODULE CONTRACT:                                                 --
 --    Receives (deps) with ctx, state, log, hook, format. Returns     --
@@ -73,7 +80,7 @@
 -----------------------------------------------------------------------
 
 local UI = {}
-UI.VERSION = "1.0.0"
+UI.VERSION = "1.1.0"
 
 local log = function() end
 local Hook = nil
@@ -124,7 +131,6 @@ local DEFAULT_THEME = {
 
 local function resolveTheme()
     T = (ctx and ctx.theme) or DEFAULT_THEME
-    -- Fill any missing keys from defaults.
     for key, value in pairs(DEFAULT_THEME) do
         if T[key] == nil then
             T[key] = value
@@ -246,17 +252,57 @@ local function resolveContainer()
 end
 
 -----------------------------------------------------------------------
--- SECTION 6 : ROW CONSTRUCTION
+-- SECTION 6 : ROW POOL
 -----------------------------------------------------------------------
+-- Rows are created once and reused forever. Each row keeps its
+-- current capture id in a mutable field so the bound mouse
+-- handlers always reference live data. Refreshes never create or
+-- destroy anything.
 
-local function makeCaptureRow(capture)
+-----------------------------------------------------------------------
+-- SECTION 6 : ROW POOL
+-----------------------------------------------------------------------
+-- Rows are created once and reused forever. Each row keeps its
+-- current capture id in a mutable field so the bound mouse
+-- handlers always reference live data. Refreshes never create or
+-- destroy anything at steady state.
+--
+-- Pool mechanics:
+--   acquireRow()    : pops a recycled row, or builds a new one if
+--                     the pool is empty and MAX_ROWS not reached
+--   releaseAllRows(): returns every in-use row to the pool and
+--                     clears the id map, called at refresh start
+--
+-- Bounds: total rows ever built never exceeds MAX_ROWS.
+
+local rowPool = {}
+local rowById = {}
+local rowTotal = 0
+
+local function acquireRow()
+    -- Reuse a recycled row if one is available.
+    local row = table.remove(rowPool)
+    if row then
+        return row
+    end
+
+    -- Pool empty. If the total built already hit the cap, refuse.
+    if rowTotal >= MAX_ROWS then
+        return nil
+    end
+
+    -- Build a brand new row. This happens at most MAX_ROWS times
+    -- in the entire session.
+    rowTotal = rowTotal + 1
+
     local row = new("TextButton", {
-        Name = "Row_" .. tostring(capture.id),
+        Name = "Row",
         Size = UDim2.new(1, -8, 0, 24),
         BackgroundColor3 = T.RowNormal,
         BorderSizePixel = 0,
         Text = "",
         AutoButtonColor = false,
+        Visible = false,
         Parent = listFrame,
     })
     corner(row, 4)
@@ -266,11 +312,7 @@ local function makeCaptureRow(capture)
         Size = UDim2.new(1, -12, 1, 0),
         Position = UDim2.new(0, 6, 0, 0),
         BackgroundTransparency = 1,
-        Text = string.format("[%d] %s:%s (%s)",
-            capture.id,
-            capture.remoteName or "?",
-            capture.method or "?",
-            capture.preview or (capture.argCount .. " args")),
+        Text = "",
         TextColor3 = T.TextSecondary,
         TextSize = 12,
         Font = Enum.Font.Gotham,
@@ -281,52 +323,92 @@ local function makeCaptureRow(capture)
 
     row.Label = label
 
+    -- Handlers bound exactly once per row. currentId is updated
+    -- by _setCurrent on every reuse, so the closures always
+    -- reference whatever capture this row currently displays.
+    local currentId = nil
+
     row.MouseEnter:Connect(function()
-        if selectedCaptureId ~= capture.id then
+        if currentId ~= selectedCaptureId then
             row.BackgroundColor3 = T.RowHover
         end
     end)
 
     row.MouseLeave:Connect(function()
-        if selectedCaptureId ~= capture.id then
+        if currentId ~= selectedCaptureId then
             row.BackgroundColor3 = T.RowNormal
         end
     end)
 
     row.MouseButton1Click:Connect(function()
-        selectedCaptureId = capture.id
-        UI.refresh()
+        if currentId then
+            selectedCaptureId = currentId
+            refreshList()
+        end
     end)
 
+    row._setCurrent = function(id)
+        currentId = id
+    end
+
     return row
+end
+
+local function releaseAllRows()
+    for id, row in pairs(rowById) do
+        row._setCurrent(nil)
+        row.Visible = false
+        rowById[id] = nil
+        table.insert(rowPool, row)
+    end
 end
 
 -----------------------------------------------------------------------
 -- SECTION 7 : LIST REFRESH
 -----------------------------------------------------------------------
+-- Update in place, never destroy. The steady-state cost of a
+-- refresh is text and color writes on existing frames.
 
 local function refreshList()
     if not isShown or not listFrame then
         return
     end
 
-    -- Clear old rows.
-    for _, child in ipairs(listFrame:GetChildren()) do
-        if child.Name:match("^Row_") then
-            child:Destroy()
-        end
-    end
+    releaseAllRows()
 
-    -- Populate with the most recent captures, newest at top.
     local captures = Hook.getRecent(MAX_ROWS)
+    local visible = 0
 
     for i = #captures, 1, -1 do
         local capture = captures[i]
-        local row = makeCaptureRow(capture)
+        local row = acquireRow()
+
+        if not row then
+            break
+        end
+
+        rowById[capture.id] = row
+        row._setCurrent(capture.id)
+
+        row.Visible = true
+        row.LayoutOrder = capture.id
+
+        row.Label.Text = string.format("[%d] %s:%s (%s)",
+            capture.id,
+            capture.remoteName or "?",
+            capture.method or "?",
+            capture.preview or (capture.argCount .. " args"))
+
         if capture.id == selectedCaptureId then
             row.BackgroundColor3 = T.RowSelected
+        else
+            row.BackgroundColor3 = T.RowNormal
         end
+
+        visible = visible + 1
     end
+
+    listFrame.CanvasSize = UDim2.new(0, 0, 0, visible * 28)
 
     local count = Hook.count()
     statusLabel.Text = string.format(
@@ -429,7 +511,6 @@ function UI.showDetail(id)
         detailFrame = nil
     end)
 
-    -- Args list.
     local argsList = new("ScrollingFrame", {
         Name = "ArgsList",
         Size = UDim2.new(1, -28, 1, -120),
@@ -493,21 +574,17 @@ function UI.showDetail(id)
 end
 
 -----------------------------------------------------------------------
--- SECTION 10 : BUTTON GRID CONSTRUCTION
+-- SECTION 10 : BUTTON GRID
 -----------------------------------------------------------------------
--- Builds the PeopleSpy-style button grid. Each button gets its
--- own handler with full error isolation.
 
 local function makeButton(text, row, col, parent, color, handler)
-    local COLS = 2
     local W = 195
     local H = 26
     local GAP_X = 6
     local GAP_Y = 4
-    local START_Y = 0
 
     local x = (col - 1) * (W + GAP_X)
-    local y = START_Y + (row - 1) * (H + GAP_Y)
+    local y = (row - 1) * (H + GAP_Y)
 
     local btn = new("TextButton", {
         Name = "Btn_" .. text:gsub("%s+", "_"),
@@ -538,13 +615,13 @@ end
 local function buildButtonGrid(parent)
     local grid = new("Frame", {
         Name = "ButtonGrid",
-        Size = UDim2.new(1, -20, 0, 200),
-        Position = UDim2.new(0, 10, 1, -230),
+        Size = UDim2.new(1, -20, 0, 180),
+        Position = UDim2.new(0, 10, 1, -210),
         BackgroundTransparency = 1,
         Parent = parent,
     })
 
-    -- Row 1: the two primary copy actions.
+    -- Row 1
     makeButton("Copy Code", 1, 1, grid, T.Accent, function()
         local capture = getSelectedCapture()
         if not capture then
@@ -570,7 +647,7 @@ local function buildButtonGrid(parent)
         end
     end)
 
-    -- Row 2: execution and script generation.
+    -- Row 2
     makeButton("Run Code", 2, 1, grid, T.Warning, function()
         local capture = getSelectedCapture()
         if not capture then
@@ -609,7 +686,7 @@ local function buildButtonGrid(parent)
         statusLabel.Text = " script printed to console"
     end)
 
-    -- Row 3: info and log clearing.
+    -- Row 3
     makeButton("Function Info", 3, 1, grid, T.Accent, function()
         local capture = getSelectedCapture()
         if not capture then
@@ -626,14 +703,14 @@ local function buildButtonGrid(parent)
         statusLabel.Text = " logs cleared"
     end)
 
-    -- Row 4: exclude by instance and by name.
+    -- Row 4
     makeButton("Exclude (i)", 4, 1, grid, T.BarTrack, function()
         local capture = getSelectedCapture()
         if not capture then
             statusLabel.Text = " no capture selected"
             return
         end
-        Hook.setBlocked(capture.remoteName, true)
+        Hook.setExcluded(capture.remoteName, true)
         statusLabel.Text = " excluded: " .. capture.remoteName
     end)
 
@@ -643,13 +720,12 @@ local function buildButtonGrid(parent)
             statusLabel.Text = " no capture selected"
             return
         end
-        -- Exclude by name: all remotes sharing this name.
         Hook.setExcluded(capture.remoteName, true)
         statusLabel.Text = " excluded by name: "
             .. capture.remoteName
     end)
 
-    -- Row 5: clear blacklist, block by instance.
+    -- Row 5
     makeButton("Clr Blacklist", 5, 1, grid, T.Error, function()
         Hook.clearFilters()
         statusLabel.Text = " blacklist cleared"
@@ -665,7 +741,7 @@ local function buildButtonGrid(parent)
         statusLabel.Text = " blocked: " .. capture.remoteName
     end)
 
-    -- Row 6: block by name, clear blocklist.
+    -- Row 6
     makeButton("Block (n)", 6, 1, grid, T.Error, function()
         local capture = getSelectedCapture()
         if not capture then
@@ -686,7 +762,7 @@ local function buildButtonGrid(parent)
 end
 
 -----------------------------------------------------------------------
--- SECTION 11 : MAIN WINDOW CONSTRUCTION
+-- SECTION 11 : MAIN WINDOW
 -----------------------------------------------------------------------
 
 local function buildMainWindow()
@@ -702,7 +778,7 @@ local function buildMainWindow()
     corner(mainWindow, 10)
     stroke(mainWindow, T.CardBorder)
 
-    -- Title bar.
+    -- Title bar
     local titleBar = new("Frame", {
         Name = "TitleBar",
         Size = UDim2.new(1, 0, 0, 36),
@@ -739,10 +815,10 @@ local function buildMainWindow()
 
     makeDraggable(titleBar, mainWindow)
 
-    -- Log display area (the big dark area).
+    -- Log display area
     listFrame = new("ScrollingFrame", {
         Name = "LogDisplay",
-        Size = UDim2.new(1, -20, 1, -290),
+        Size = UDim2.new(1, -20, 1, -270),
         Position = UDim2.new(0, 10, 0, 44),
         BackgroundColor3 = T.Background,
         BorderSizePixel = 0,
@@ -759,10 +835,10 @@ local function buildMainWindow()
         Parent = listFrame,
     })
 
-    -- Button grid.
+    -- Button grid
     buildButtonGrid(mainWindow)
 
-    -- Status bar.
+    -- Status bar
     statusLabel = new("TextLabel", {
         Name = "Status",
         Size = UDim2.new(1, -20, 0, 20),
@@ -845,7 +921,6 @@ function UI.init(deps)
 
     buildMainWindow()
 
-    -- Wire the capture callback.
     Hook.onCapture = onCapture
 
     log("INFO", "ui online (tier " .. tier .. ")")
