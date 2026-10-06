@@ -1,16 +1,24 @@
 --[[
-    simplyspirited v4.6 loader
+    simplyspirited v4.6 — loader
     SHADOWMILESC / computerizedcarrier2
 
     one line, any game:
     loadstring(game:HttpGet(".../Load.lua?nocache=" .. os.time()))()
 
-    the loading screen doubles as the boot report: every part
-    prints a line as it loads, failures are named in red, and
-    the window hands off to the ui when done.
+    the splash IS the boot report: parts check in live, failures
+    are named with reasons, and the bar completes when the suite
+    is ready. the splash then hands off to ui.lua's window.
+
+    parts (13):
+      ENGINE → CLOSURE → CALLERS → SURVEILLANCE → INTERFACE →
+      GOVERNOR → STEALTH → ARG FIDELITY → DECOMPILER → VAULT →
+      GAME DUMP
+
+    required parts halt cleanly with the reason. optional parts
+    degrade the suite, never kill it.
 ]]
 
--- ═══ boot splash (instant, before anything fetches) ═══
+-- ═══ splash: instant feedback before the first fetch ═══
 local Players = game:GetService("Players")
 local P = Players.LocalPlayer
 local UIS = game:GetService("UserInputService")
@@ -25,7 +33,7 @@ end)
 if not okRoot then gui.Parent = P:WaitForChild("PlayerGui") end
 
 local T = {
-    BG   = Color3.fromRGB(9, 9, 9),
+    BG   = Color3.fromRGB(8, 8, 8),
     RAIL = Color3.fromRGB(14, 14, 14),
     TEXT = Color3.fromRGB(210, 210, 210),
     DIM  = Color3.fromRGB(98, 98, 98),
@@ -40,7 +48,7 @@ win.BorderSizePixel = 0
 win.Active = true
 win.Parent = gui
 
--- drag for the splash too (it might sit on the loading screen a while)
+-- drag
 local dragging, dStart, dPos = false, nil, nil
 local hdr = Instance.new("Frame")
 hdr.Size = UDim2.new(1, 0, 0, 22)
@@ -77,7 +85,7 @@ UIS.InputEnded:Connect(function()
     dragging = false
 end)
 
--- status lines
+-- log lines
 local logFrame = Instance.new("Frame")
 logFrame.Size = UDim2.new(1, -16, 1, -66)
 logFrame.Position = UDim2.fromOffset(8, 30)
@@ -102,7 +110,6 @@ local function addLine(text, color)
     l.Text = text
     l.LayoutOrder = lineCount
     l.Parent = logFrame
-    -- keep last 12 lines visible
     if lineCount > 12 then
         for _, c in ipairs(logFrame:GetChildren()) do
             if c:IsA("TextLabel") and c.LayoutOrder <= lineCount - 12 then
@@ -138,6 +145,7 @@ pctLabel.Parent = win
 
 addLine("ss2 :: simplyspirited v4.6", T.TEXT)
 addLine("operator: " .. P.Name, T.DIM)
+addLine("", T.DIM)
 
 -- ═══ CONFIG ═══
 local REPO = "https://raw.githubusercontent.com/randomguy454/simplyspirited/refs/heads/main/"
@@ -148,13 +156,11 @@ local PARTS = {
     { file = "callers.lua",      name = "CALLERS",      required = false },
     { file = "watch.lua",        name = "SURVEILLANCE", required = false },
     { file = "ui.lua",           name = "INTERFACE",    required = true  },
-    { file = "output.lua",       name = "OUTPUT",       required = false },
     { file = "governor.lua",     name = "GOVERNOR",     required = false },
     { file = "stealth.lua",      name = "STEALTH",      required = false },
     { file = "describe_ext.lua", name = "ARG FIDELITY", required = false },
     { file = "decomp.lua",       name = "DECOMPILER",   required = false },
     { file = "export.lua",       name = "VAULT",        required = false },
-    { file = "vault2.lua",       name = "VAULT 2",      required = false },
     { file = "ss_dump.lua",      name = "GAME DUMP",    required = false },
 }
 
@@ -163,7 +169,7 @@ getgenv().SS2 = nil
 getgenv().SS2_READY = nil
 getgenv().SS2_UI = nil
 
--- ═══ LOAD SEQUENCE (with live splash updates) ═══
+-- ═══ LOAD SEQUENCE ═══
 local loaded, failed = 0, {}
 local results = {}
 
@@ -184,7 +190,7 @@ for i, part in ipairs(PARTS) do
         results[#results + 1] = { name = part.name, ok = false, why = "fetch" }
         addLine("  ✗ " .. part.name .. " — fetch failed", T.RED)
         if part.required then
-            addLine("!! boot halted — " .. part.file .. " is required", T.RED)
+            addLine("!! boot halted — " .. part.file .. " required", T.RED)
             task.wait(3)
             gui:Destroy()
             return
@@ -224,12 +230,11 @@ for i, part in ipairs(PARTS) do
 end
 
 -- ═══ FINAL REPORT ═══
-local finalPct = 100
 pctLabel.Text = "100%"
 barFill.Size = UDim2.new(1, 0, 1, 0)
 
 if #failed == 0 then
-    addLine("── 13/13 online ──", T.TEXT)
+    addLine("── " .. loaded .. "/" .. #PARTS .. " online ──", T.TEXT)
 elseif loaded > 0 then
     addLine("── partial: " .. loaded .. "/" .. #PARTS .. " ──", T.RED)
     for _, f in ipairs(failed) do
@@ -242,9 +247,17 @@ else
     return
 end
 
--- ═══ HANDOFF: destroy splash, let the suite's UI take over ═══
+-- fingerprint
+local SS2 = getgenv().SS2
+if SS2 then
+    SS2.sessionStart = os.date()
+    SS2.operator = "SHADOWMILESC"
+    SS2.displayName = "computerizedcarrier2"
+    SS2.version = "4.6"
+end
+getgenv().SIMPLYSPIRITED_V2 = loaded
+
+-- ═══ HANDOFF ═══
 task.wait(1.2)
 gui:Destroy()
-print("[loader] complete — " .. loaded .. "/" .. #PARTS .. " | simplyspirited by SHADOWMILESC")
-
-getgenv().SIMPLYSPIRITED_V2 = loaded
+print("[loader] " .. loaded .. "/" .. #PARTS .. " | simplyspirited v4.6 | SHADOWMILESC")
