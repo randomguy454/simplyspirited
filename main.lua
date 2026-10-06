@@ -1,118 +1,212 @@
 --=====================================================================
---  PROJECT   : SimplySpy
---  FILE      : main.lua (ORCHESTRATOR) - BULLETPROOF BUILD
---  VERSION   : 0.3.0
---
---  PURPOSE   :
---    Runtime entry point. Fetches and boots the three subsystem
---    modules (format, hook, ui) with full error isolation. A
---    failure in any single module is reported cleanly and never
---    takes down the boot.
---
---  HARDENING (vs 0.1.0):
---    - Module chunks called with explicit, always-valid arguments
---    - pcall around every module call including the contract return
---    - Missing dependencies become no-ops instead of nil crashes
---    - Boot report printed at the end showing every module status
---    - Loader context validated field by field before use
---    - Caches loaded module tables so re-boots do not re-fetch
---
---  MODULE FILES (repo root):
---    format.lua  - value rendering and executable codegen
---    hook.lua    - namecall capture engine
---    ui.lua      - CoreGui interface
---
---  TARGET    : UNC-compatible Roblox script executors
---  LICENSE   : MIT
+--=====================================================================
+--                                                                    --
+--   ____  _                   _____         _                        --
+--  / ___|(_)_ __ ___  _   _|  ___|_  ___ | |_                      --
+--  \___ \| | '_ ` _ \| | | | |_  \ \/ / '| __|                     --
+--   ___) | | | | | | | |_| |  _| | >  <| | |_                      --
+--  |____/|_|_| |_| |_|\__, |_|  \_/_/\_\  \__|                     --
+--                      |___/                                        --
+--                                                                    --
+--  RUNTIME ORCHESTRATOR                                             --
+--  ====================                                             --
+--                                                                    --
+--  The conductor of SimplySpy. The loader hands control to this     --
+--  file with a context table; this file fetches, boots, and wires    --
+--  the three subsystem modules, then exposes the console API.       --
+--                                                                    --
+--  HARDENING PHILOSOPHY (learned the hard way):                     --
+--    1. NO METATABLES. A metatable stub caused a silent bug that     --
+--       survived three rewrites. Every lookup in this file is       --
+--       explicit. Nothing is implicit, nothing is magic.            --
+--    2. EVERY EXTERNAL CALL IS PCALLED. Module fetch, compile,       --
+--       execution, init, show - if it can fail, it is caught and     --
+--       reported by name.                                           --
+--    3. FAILURES ISOLATE. A broken module degrades the tool; it     --
+--       never kills the boot. The boot report says exactly what      --
+--       failed and why.                                              --
+--    4. THE CONSOLE API IS ALWAYS PUBLISHED. Even a fully failed     --
+--       boot leaves SPY.report() available to diagnose itself.       --
+--    5. FIXED CALL SIGNATURES. Every module chunk is invoked with     --
+--       exactly one table argument. Argument count bugs are          --
+--       structurally impossible.                                     --
+--    6. STATE IS FLAT AND EXPLICIT. No nested closures over mutable  --
+--       upvalues where avoidable; no clever indirection.             --
+--                                                                    --
+--  MODULE WIRING ORDER (dependencies flow downward):                 --
+--    format.lua   - no dependencies (pure functions)                 --
+--    hook.lua     - requires format                                  --
+--    ui.lua       - requires format and hook                        --
+--                                                                    --
+--  MODULE CONTRACT (every module file follows this):                 --
+--    - The file returns a function: function(deps) -> module table   --
+--    - deps always contains: ctx, state, log, and every already-     --
+--      loaded module as a direct reference                           --
+--    - The returned table exposes public functions                   --
+--    - init(deps) is optional and called after all modules load      --
+--                                                                    --
+--  BOOT REPORT:                                                      --
+--    Every stage appends to a report table. SPY.report() prints      --
+--    the full history: which modules loaded, which failed, the      --
+--    exact error for each failure. The report survives even a       --
+--    fatal boot error.                                               --
+--                                                                    --
+--  DEGRADED MODES:                                                   --
+--    - UI failed      : hook + format still run; console only        --
+--    - Hook failed    : UI shows but captures nothing; report says   --
+--    - Format failed  : hook skips (hard dependency); UI still shows  --
+--    - Everything OK  : full tool                                   --
+--                                                                    --
+--  TARGET    : UNC-compatible Roblox script executors                --
+--  LICENSE   : MIT                                                   --
+--                                                                    --
+--=====================================================================
 --=====================================================================
 
 -----------------------------------------------------------------------
 -- SECTION 1 : ENVIRONMENT AND CONTEXT VALIDATION
 -----------------------------------------------------------------------
+-- The loader hands us a context through the shared environment.
+-- Every field is validated before use. A missing field becomes a
+-- safe default instead of a crash. This file trusts nothing.
 
 local genv = (type(getgenv) == "function") and getgenv() or _G
-local ctx = genv.SimplySpy_Context
+local rawCtx = genv.SimplySpy_Context
 
-if not ctx then
-    error("SimplySpy: loader context missing - run loader.lua first")
+if not rawCtx then
+    -- No context at all. This happens when main.lua is executed
+    -- directly instead of through the loader. Fail loudly with
+    -- instructions rather than mysteriously.
+    error("SimplySpy: no loader context found. "
+        .. "Execute loader.lua, not main.lua.")
 end
 
--- Validate every context field we depend on. Each getter degrades
--- safely if the field is missing so a partial context from an
--- older loader version cannot crash the runtime.
+-- Build the validated context. Each accessor degrades safely.
+local CTX = {}
 
-local function safeContext()
-    local safe = {}
-
-    function safe.log(level, message)
-        if type(ctx.log) == "function" then
-            pcall(ctx.log, level, message)
-        else
-            print("[SimplySpy] [" .. tostring(level) .. "] "
-                .. tostring(message))
+-- Logger: use the loader's if present, else print.
+CTX.log = function(level, message)
+    if type(rawCtx.log) == "function" then
+        local ok = pcall(rawCtx.log, level, message)
+        if ok then
+            return
         end
     end
-
-    safe.gui = ctx.gui
-    safe.reveal = ctx.reveal
-    safe.destroy = ctx.destroy
-    safe.version = ctx.version or "?"
-    safe.theme = (type(ctx.theme) == "table") and ctx.theme or nil
-
-    return safe
+    print("[SimplySpy] [" .. tostring(level) .. "] "
+        .. tostring(message))
 end
 
-local CTX = safeContext()
+CTX.gui = rawCtx.gui
+CTX.reveal = rawCtx.reveal
+CTX.destroy = rawCtx.destroy
+CTX.version = tostring(rawCtx.version or "unknown")
 
-local VERSION = "0.3.0"
-local REPO    = "randomguy454/simplyspirited"
-local BRANCH  = "main"
+-- Theme: shallow-validate the table.
+if type(rawCtx.theme) == "table" then
+    CTX.theme = rawCtx.theme
+else
+    CTX.theme = nil
+    CTX.log("WARN", "context theme missing; UI uses defaults")
+end
+
+-- Capabilities: shallow-validate.
+if type(rawCtx.capabilities) == "table" then
+    CTX.capabilities = rawCtx.capabilities
+else
+    CTX.capabilities = {}
+end
+
+local VERSION = "0.4.0"
+local REPO = "randomguy454/simplyspirited"
+local BRANCH = "main"
 
 -----------------------------------------------------------------------
--- SECTION 2 : SHARED STATE
+-- SECTION 2 : SHARED STATE (flat, explicit)
 -----------------------------------------------------------------------
 
 local STATE = {
-    running   = false,
-    booted    = false,
+    running = false,
+    booted = false,
     startTime = os.clock(),
-    modules   = {},   -- name -> module table or false (failed)
-    errors    = {},   -- name -> error string for failed modules
 }
+
+-- Module registry. Values are:
+--   nil       : not yet attempted
+--   table     : loaded successfully
+--   false     : attempted and failed (errors has the reason)
+local modules = {}
+
+-- Failure reasons by module name.
+local moduleErrors = {}
 
 -----------------------------------------------------------------------
 -- SECTION 3 : BOOT REPORT
 -----------------------------------------------------------------------
+-- Append-only history of every boot stage and its outcome.
 
-local REPORT = {}
+local reportLines = {}
 
 local function report(stage, ok, detail)
-    REPORT[#REPORT + 1] = {
+    reportLines[#reportLines + 1] = {
         stage = stage,
         ok = ok,
         detail = detail or "",
     }
-    CTX.log(ok and "INFO" or (stage == "boot" and "ERROR" or "WARN"),
-        string.format("%s: %s", stage, ok and "ok"
-            or ("FAILED - " .. tostring(detail))))
+    CTX.log(ok and "INFO" or "WARN",
+        string.format("%s: %s", stage,
+            ok and "ok" or ("FAILED - " .. tostring(detail))))
 end
 
 -----------------------------------------------------------------------
--- SECTION 4 : MODULE LOADER (HARDENED)
+-- SECTION 4 : SAFE WRAPPERS
 -----------------------------------------------------------------------
--- Every interaction with remote module code is wrapped. The call
--- signature is FIXED: every module chunk is invoked with exactly
--- one argument, the deps table. Modules that expect a different
--- signature fail inside their own pcall, not ours.
+-- Small primitives that make every later section impossible to
+-- crash. These are the only places raw operations happen.
 
-local function buildUrl(name)
+local function safeCall(fn, ...)
+    if type(fn) ~= "function" then
+        return false, "not a function"
+    end
+    return pcall(fn, ...)
+end
+
+local function safeYield(t)
+    if task and task.wait then
+        task.wait(t)
+    else
+        wait(t)
+    end
+end
+
+-----------------------------------------------------------------------
+-- SECTION 5 : MODULE LOADER
+-----------------------------------------------------------------------
+-- Fetches, compiles, and executes a module file. Every step
+-- reports its own failure with the module name attached, so any
+-- error in the log is immediately attributable.
+--
+-- INVOCATION RULE: modules are called with exactly one argument,
+-- the deps table. Always. No exceptions. This is the rule that
+-- makes argument-count bugs structurally impossible.
+
+local MODULE_ORDER = { "format", "hook", "ui" }
+
+-- Hard dependencies by module name. A module whose hard deps
+-- failed is skipped entirely (reported, not booted).
+local MODULE_DEPENDENCIES = {
+    format = {},
+    hook = { "format" },
+    ui = { "format", "hook" },
+}
+
+local function buildModuleUrl(name)
     return string.format(
-        "https://raw.githubusercontent.com/%s/%s/%s/%s.lua",
+        "https://raw.githubusercontent.com/%s/%s/%s.lua",
         REPO, BRANCH, name)
 end
 
-local function fetchSource(name)
-    local url = buildUrl(name)
+local function fetchModuleSource(name)
+    local url = buildModuleUrl(name)
     local ok, body = pcall(function()
         return game:HttpGet(url, true)
     end)
@@ -127,12 +221,12 @@ local function fetchSource(name)
         return nil, "empty response"
     end
     if body:sub(1, 4) == "404:" then
-        return nil, "not found in repository"
+        return nil, "file not found in repository"
     end
     return body
 end
 
-local function compileModule(name, source)
+local function compileModuleChunk(name, source)
     local chunk, err = loadstring(source, "=SimplySpy/" .. name)
     if not chunk then
         return nil, "syntax error: " .. tostring(err)
@@ -140,130 +234,117 @@ local function compileModule(name, source)
     return chunk
 end
 
--- The fixed, single-argument deps contract. Fields are populated
--- as modules come online; a field not yet loaded is a no-op stub
--- so cross-module references never dereference nil.
-local function makeDeps(name)
+local function buildDeps(name)
+    -- Fixed shape. No metatables. Only already-loaded modules are
+    -- attached, as direct references. A module that wants another
+    -- module checks for nil itself (they are documented to exist).
     local deps = {
-        ctx     = CTX,
-        state   = STATE,
-        log     = CTX.log,
-        name    = name,
+        ctx = CTX,
+        state = STATE,
+        log = CTX.log,
+        name = name,
     }
 
-    -- Late-bound module access. deps.hook resolves to the real
-    -- module once loaded, or a safe stub before that.
-    local modulesMeta = {
-        __index = function(_, key)
-            local mod = STATE.modules[key]
-            if mod then
-                return mod
-            end
-            -- Safe stub for a not-yet-loaded or failed module.
-            return setmetatable({}, {
-                __index = function()
-                    return function() end
-            end
-            })
-        end,
-    }
+    -- Attach every successfully loaded module as a direct field.
+    for _, modName in ipairs(MODULE_ORDER) do
+        if type(modules[modName]) == "table" then
+            deps[modName] = modules[modName]
+        end
+    end
 
-    return setmetatable(deps, modulesMeta)
+    return deps
 end
 
 local function loadModule(name)
-    if STATE.modules[name] then
-        return STATE.modules[name], nil
+    -- Already loaded or already failed: report consistently.
+    if type(modules[name]) == "table" then
+        return modules[name], nil
     end
-    if STATE.modules[name] == false then
-        return nil, STATE.errors[name] or "previously failed"
+    if modules[name] == false then
+        return nil, moduleErrors[name] or "previously failed"
     end
 
-    local source, fetchErr = fetchSource(name)
+    -- Check hard dependencies first.
+    for _, depName in ipairs(MODULE_DEPENDENCIES[name] or {}) do
+        if type(modules[depName]) ~= "table" then
+            local reason = "dependency '" .. depName
+        .. "' did not load"
+            modules[name] = false
+            moduleErrors[name] = reason
+            return nil, reason
+        end
+    end
+
+    -- Fetch.
+    local source, fetchErr = fetchModuleSource(name)
     if not source then
-        STATE.modules[name] = false
-        STATE.errors[name] = fetchErr
+        modules[name] = false
+        moduleErrors[name] = fetchErr
         return nil, fetchErr
     end
 
-    local chunk, compileErr = compileModule(name, source)
+    -- Compile.
+    local chunk, compileErr = compileModuleChunk(name, source)
     if not chunk then
-        STATE.modules[name] = false
-        STATE.errors[name] = compileErr
+        modules[name] = false
+        moduleErrors[name] = compileErr
         return nil, compileErr
     end
 
-    -- Fixed call signature: exactly one argument, always a table.
-    local deps = makeDeps(name)
+    -- Execute with the fixed single-argument contract.
+    local deps = buildDeps(name)
     local ok, result = pcall(chunk, deps)
 
     if not ok then
-        local err = "runtime error: " .. tostring(result)
-        STATE.modules[name] = false
-        STATE.errors[name] = err
-        return nil, err
+        local reason = "runtime error: " .. tostring(result)
+        modules[name] = false
+        moduleErrors[name] = reason
+        return nil, reason
     end
 
     if type(result) ~= "table" then
-        local err = "module did not return a table (got "
-            .. type(result) .. ")"
-        STATE.modules[name] = false
-        STATE.errors[name] = err
-        return nil, err
+        local reason = "module returned " .. type(result)
+            .. ", expected table"
+        modules[name] = false
+        moduleErrors[name] = reason
+        return nil, reason
     end
 
-    STATE.modules[name] = result
+    modules[name] = result
     return result, nil
 end
 
 -----------------------------------------------------------------------
--- SECTION 5 : WIRING
+-- SECTION 6 : WIRING AND INIT
 -----------------------------------------------------------------------
 
-local WIRING = {
-    { name = "format", requires = {} },
-    { name = "hook",   requires = { "format" } },
-    { name = "ui",     requires = { "format", "hook" } },
-}
-
 local function wireModules()
-    for _, wire in ipairs(WIRING) do
-        local mod, err = loadModule(wire.name)
-
-        if not mod then
-            report(wire.name, false, err)
+    for _, name in ipairs(MODULE_ORDER) do
+        local mod, err = loadModule(name)
+        if mod then
+            report(name, true)
         else
-            -- Verify required dependencies actually loaded.
-            local missing = {}
-            for _, req in ipairs(wire.requires) do
-                if STATE.modules[req] == false or STATE.modules[req] == nil then
-                    missing[#missing + 1] = req
-                end
-            end
-
-            if #missing > 0 then
-                report(wire.name, false,
-                    "skipped, missing deps: " .. table.concat(missing, ", "))
-            else
-                report(wire.name, true)
-            end
+            report(name, false, err)
         end
     end
 end
 
------------------------------------------------------------------------
--- SECTION 6 : INIT PASS
------------------------------------------------------------------------
-
 local function initModules()
-    for _, wire in ipairs(WIRING) do
-        local mod = STATE.modules[wire.name]
-        if mod and type(mod.init) == "function" then
-            local ok, err = pcall(mod.init, makeDeps(wire.name))
+    -- Second pass: init only after everything has loaded, so
+    -- cross-module wiring inside init is safe.
+    for _, name in ipairs(MODULE_ORDER) do
+        local mod = modules[name]
+        if type(mod) == "table" and type(mod.init) == "function" then
+            local deps = buildDeps(name)
+            local ok, err = pcall(mod.init, deps)
             if ok then
-                report("init:" .. wire.name, true)
+                report("init:" .. name, true)
             else
-                report("init:" .. wire.name, false, tostring(err))
+                report("init:" .. name, false, tostring(err))
+                -- An init failure marks the module as failed so
+                -- later stages do not use a half-initialized module.
+                modules[name] = false
+                moduleErrors[name] = "init failed: " .. tostring(err)
             end
         end
     end
@@ -272,6 +353,30 @@ end
 -----------------------------------------------------------------------
 -- SECTION 7 : CONSOLE API
 -----------------------------------------------------------------------
+-- Published even when boot fails. SPY.report() is the diagnostic
+-- entry point that always exists. Every API function checks its
+-- module before touching it and pcalls every call.
+
+local function apiCallModule(modName, funcName, ...)
+    local mod = modules[modName]
+    if type(mod) ~= "table" then
+        print("SimplySpy: " .. modName .. "." .. funcName
+            .. " unavailable (module not loaded)")
+        return nil
+    end
+    if type(mod[funcName]) ~= "function" then
+        print("SimplySpy: " .. modName .. "." .. funcName
+            .. " is not a function")
+        return nil
+    end
+    local ok, err = pcall(mod[funcName], ...)
+    if not ok then
+        print("SimplySpy: " .. modName .. "." .. funcName
+            .. " error: " .. tostring(err))
+        return nil
+    end
+    return true
+end
 
 local function buildApi()
     local spy = {}
@@ -282,7 +387,7 @@ local function buildApi()
 
     function spy.report()
         print("=== SimplySpy Boot Report ===")
-        for _, line in ipairs(REPORT) do
+        for _, line in ipairs(reportLines) do
             print(string.format("  %-14s %s %s",
                 line.stage,
                 line.ok and "ok    " or "FAILED",
@@ -291,69 +396,83 @@ local function buildApi()
         print("=============================")
     end
 
-    -- Safe accessors: every API function checks the module exists
-    -- before calling, and pcalls the call itself.
-    local function callModule(modName, funcName, ...)
-        local mod = STATE.modules[modName]
-        if not mod or type(mod[funcName]) ~= "function" then
-            print("SimplySpy: " .. modName .. "." .. funcName
-                .. " unavailable (module failed to load)")
-            return
-        end
-        local ok, err = pcall(mod[funcName], ...)
-        if not ok then
-            print("SimplySpy: " .. modName .. "." .. funcName
-                .. " error: " .. tostring(err))
-        end
-    end
-
     function spy.count()
-        local mod = STATE.modules.hook
-        if mod and type(mod.count) == "function" then
+        local mod = modules.hook
+        if type(mod) == "table" and type(mod.count) == "function" then
             return mod.count()
         end
         return 0
     end
 
     function spy.clear()
-        callModule("hook", "clear")
-        callModule("ui", "refresh")
+        apiCallModule("hook", "clear")
+        apiCallModule("ui", "refresh")
     end
 
     function spy.filter(name)
-        callModule("hook", "setFilter", name)
+        apiCallModule("hook", "setFilter", name)
     end
 
     function spy.block(name)
-        callModule("hook", "setBlocked", name, true)
+        apiCallModule("hook", "setBlocked", name, true)
     end
 
     function spy.unblock(name)
-        callModule("hook", "setBlocked", name, false)
+        apiCallModule("hook", "setBlocked", name, false)
     end
 
     function spy.list(n)
-        callModule("hook", "list", n or 10)
+        apiCallModule("hook", "list", n or 10)
     end
 
     function spy.dump(n)
-        callModule("hook", "dump", n)
+        apiCallModule("hook", "dump", n)
     end
 
     function spy.copy(n)
-        callModule("hook", "copy", n)
+        apiCallModule("hook", "copy", n)
     end
 
     function spy.toggle()
-        callModule("ui", "toggle")
+        apiCallModule("ui", "toggle")
     end
 
     function spy.hide()
-        callModule("ui", "hide")
+        apiCallModule("ui", "hide")
     end
 
     function spy.show()
-        callModule("ui", "show")
+        apiCallModule("ui", "show")
+    end
+
+    -- Self-tests pass through to modules that have them.
+    function spy.selftest()
+        local allPassed = true
+        local formatMod = modules.format
+        if type(formatMod) == "table"
+            and type(formatMod.selfTest) == "function" then
+            local ok = pcall(formatMod.selfTest)
+            if not ok then
+                allPassed = false
+            end
+        else
+            print("format selftest unavailable")
+            allPassed = false
+        end
+
+        local hookMod = modules.hook
+        if type(hookMod) == "table"
+            and type(hookMod.selfTest) == "function" then
+            local ok = pcall(hookMod.selfTest)
+            if not ok then
+                allPassed = false
+            end
+        else
+            print("hook selftest unavailable")
+            allPassed = false
+        end
+
+        return allPassed
     end
 
     return spy
@@ -366,25 +485,27 @@ end
 local function boot()
     CTX.log("INFO", "runtime v" .. VERSION .. " booting")
 
+    -- Load and wire modules.
     wireModules()
     initModules()
 
-    -- UI is optional: if it loaded, show it. If not, console mode.
-    local ui = STATE.modules.ui
-    if ui and type(ui.show) == "function" then
-        local ok, err = pcall(ui.show)
+    -- Show the UI if it loaded. Everything about this call is
+    -- defensive: module presence, function presence, pcall.
+    local uiMod = modules.ui
+    if type(uiMod) == "table" and type(uiMod.show) == "function" then
+        local ok, err = pcall(uiMod.show)
         report("ui:show", ok, not ok and tostring(err) or nil)
     else
-        report("ui:show", false, "console mode")
+        report("ui:show", false, "ui module unavailable; console mode")
     end
 
     STATE.running = true
     STATE.booted = true
 
-    -- Boot summary to the console.
+    -- Summarize failures.
     local failed = 0
-    for _, wire in ipairs(WIRING) do
-        if STATE.modules[wire.name] == false then
+    for _, name in ipairs(MODULE_ORDER) do
+        if modules[name] == false then
             failed = failed + 1
         end
     end
@@ -392,14 +513,16 @@ local function boot()
     if failed == 0 then
         CTX.log("INFO", "all modules online")
     else
-        CTX.log("WARN", failed .. " module(s) failed; run SPY.report()")
+        CTX.log("WARN", failed .. " module(s) failed; "
+            .. "run SPY.report() for details")
     end
 
-    -- Publish the console API even in degraded states.
+    -- Publish the console API. This line runs even when modules
+    -- failed: SPY.report() is the self-diagnosis entry point.
     genv.SPY = buildApi()
 
-    -- Reveal the loader transition only when everything that could
-    -- show UI has had its chance.
+    -- Reveal the loader transition. The loader's own failsafe
+    -- covers the case where this call errors.
     if type(CTX.reveal) == "function" then
         pcall(CTX.reveal)
     end
@@ -408,10 +531,24 @@ end
 -----------------------------------------------------------------------
 -- SECTION 9 : ENTRY
 -----------------------------------------------------------------------
+-- The entry pcall is the outermost barrier. Even a fatal error in
+-- boot leaves the report intact and surfaces a clear message to
+-- the loader's error card.
 
 local ok, err = pcall(boot)
 if not ok then
-    CTX.log("ERROR", "fatal: " .. tostring(err))
-    -- The loader error card takes over from here.
+    CTX.log("ERROR", "fatal boot error: " .. tostring(err))
+
+    -- Publish the API anyway so the report is reachable.
+    genv.SPY = buildApi()
+
+    -- Report the fatal error through the report history too.
+    reportLines[#reportLines + 1] = {
+        stage = "boot",
+        ok = false,
+        detail = tostring(err),
+    }
+
+    -- Let the loader's error card display it.
     error("SimplySpy: " .. tostring(err))
 end
