@@ -1,14 +1,17 @@
 -- ════════════════════════════════════════════════════════════
---  SIMPLYSPIRITED v2.7 — CORE ENGINE
+--  SIMPLYSPIRITED v3.1 — CORE ENGINE
 --  For SHADOWMILESC (computerizedcarrier2)
 --  ────────────────────────────────────────────────────────────
 --  Universal remote intelligence. Assumes nothing about the game.
---  • Discovery + hooks: every RemoteEvent/Function, in AND out
---  • v2.7: PERIODIC RESCAN — catches remotes missed at boot race
---  • Full call storage: RAW args preserved (replayer-grade)
---  • Remote profiles: per-remote counts + arg signature histories
---  • Value watcher: any ValueBase, delta-tracked
---  • Player census • session journal • verbosity-gated output
+--  ────────────────────────────────────────────────────────────
+--  v3.1 CAPTURE ARCHITECTURE (the completeness fix):
+--   INBOUND:  OnClientEvent connections — 100% reliable
+--   OUTBOUND: namecall net ONLY — every FireServer/InvokeServer
+--             in the game passes through it, nothing to miss.
+--   The per-remote hookfunction layer is DELETED — it was the
+--   fragile half and the source of missed remotes.
+--  Also: periodic rescan (15s), value watcher, census, journal,
+--  verbosity-gated output (quiet/smart/loud).
 --  All state: getgenv().SS2
 -- ════════════════════════════════════════════════════════════
 
@@ -19,7 +22,7 @@ local P = Players.LocalPlayer
 
 -- ═══════════ STATE ═══════════
 getgenv().SS2 = {
-    version = "2.7",
+    version = "3.1",
     game = game.Name,
     placeId = game.PlaceId,
     jobId = game.JobId,
@@ -31,6 +34,7 @@ getgenv().SS2 = {
     players = {},   -- [player] = snapshot
 
     verbosity = "smart",  -- "quiet" | "smart" | "loud"
+    metaHooked = false,
 
     filters = {
         heartbeat = true, stepped = true, renderstepped = true,
@@ -168,7 +172,7 @@ local function recordCall(remote, args, direction)
 end
 SS2.recordCall = recordCall
 
--- ═══════════ REMOTE HOOKS ═══════════
+-- ═══════════ REMOTE DISCOVERY (inbound + profiles) ═══════════
 local function profileFor(r)
     local prof = SS2.remotes[r]
     if not prof then
@@ -177,7 +181,9 @@ local function profileFor(r)
             class = r.ClassName,
             calls = 0, out = 0, inn = 0,
             hooked = false,
+            metaCaught = 0,
             sigs = {},
+            callers = {},
             firstSeen = os.date("%H:%M:%S"),
         }
         pcall(function()
@@ -187,12 +193,14 @@ local function profileFor(r)
     end
     return prof
 end
+SS2.profileFor = profileFor
 
 local function hookRemote(r)
     local prof = profileFor(r)
     if prof.hooked then return end
     prof.hooked = true
 
+    -- INBOUND ONLY — outbound capture is the namecall net's job
     if r:IsA("RemoteEvent") then
         pcall(function()
             r.OnClientEvent:Connect(function(...)
@@ -202,26 +210,6 @@ local function hookRemote(r)
             end)
         end)
     end
-
-    pcall(function()
-        local oldFire
-        oldFire = hookfunction(r.FireServer, function(self, ...)
-            prof.calls = prof.calls + 1
-            prof.out = prof.out + 1
-            recordCall(r, { ... }, "OUT")
-            return oldFire(self, ...)
-        end)
-    end)
-
-    pcall(function()
-        local oldInvoke
-        oldInvoke = hookfunction(r.InvokeServer, function(self, ...)
-            prof.calls = prof.calls + 1
-            prof.out = prof.out + 1
-            recordCall(r, { ... }, "OUT")
-            return oldInvoke(self, ...)
-        end)
-    end)
 end
 SS2.hookRemote = hookRemote
 
@@ -243,9 +231,8 @@ game.DescendantAdded:Connect(function(d)
     end
 end)
 
--- ═══════════ v2.7: PERIODIC RESCAN ═══════════
--- Boot-time discovery can race slow-loading games. This sweep
--- catches any remote that loaded late or was missed, every 15s.
+-- ═══════════ PERIODIC RESCAN (15s) ═══════════
+-- catches remotes that loaded late or were missed at boot
 task.spawn(function()
     while true do
         task.wait(15)
@@ -257,6 +244,32 @@ task.spawn(function()
             end
         end)
     end
+end)
+
+-- ═══════════ NAMECALL NET (THE outbound capture) ═══════════
+-- promoted from hookmeta.lua — every FireServer/InvokeServer in
+-- the game passes through here. Complete by architecture.
+pcall(function()
+    local oldNamecall
+    oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+        local method = getnamecallmethod()
+        if self and typeof(self) == "Instance" then
+            local ok, class = pcall(function() return self.ClassName end)
+            if ok and (class == "RemoteEvent" or class == "RemoteFunction") then
+                if method == "FireServer" or method == "InvokeServer" then
+                    local args = { ... }
+                    local prof = profileFor(self)
+                    prof.calls = prof.calls + 1
+                    prof.out = prof.out + 1
+                    prof.metaCaught = prof.metaCaught + 1
+                    recordCall(self, args, "OUT")
+                end
+            end
+        end
+        return oldNamecall(self, ...)
+    end)
+    SS2.metaHooked = true
+    print("[SS2-core] namecall net armed — outbound capture: TOTAL")
 end)
 
 -- ═══════════ VALUE WATCHER ═══════════
@@ -351,8 +364,8 @@ end)
 local remoteCount = scanAllRemotes()
 
 journal("BOOT", "suite online in " .. SS2.game)
-print("[SS2-core] discovered + hooked " .. remoteCount .. " remotes")
-print("[SS2-core] periodic rescan: every 15s (catches boot-race misses)")
-print("[SS2-core] verbosity: " .. SS2.verbosity .. " | value watcher | census | journal")
+print("[SS2-core] discovered " .. remoteCount .. " remotes (inbound watch)")
+print("[SS2-core] namecall net: " .. tostring(SS2.metaHooked) .. " (outbound watch)")
+print("[SS2-core] periodic rescan: every 15s | verbosity: " .. SS2.verbosity)
 print("[SS2-core] engine ready")
 getgenv().SS2_READY = true
