@@ -302,6 +302,20 @@ local function loadModule(name)
         return nil, reason
     end
 
+        -- Modules may return their table directly or a factory
+    -- function that accepts deps and returns the table. Support
+    -- both contracts.
+    if type(result) == "function" then
+        local factoryOk, modTable = pcall(result, deps)
+        if not factoryOk then
+            local reason = "factory error: " .. tostring(modTable)
+            modules[name] = false
+            moduleErrors[name] = reason
+            return nil, reason
+        end
+        result = modTable
+    end
+
     if type(result) ~= "table" then
         local reason = "module returned " .. type(result)
             .. ", expected table"
