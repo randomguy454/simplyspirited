@@ -1,16 +1,15 @@
 --[[
-    simplyspirited v5.0 — interface
+    simplyspirited v5.1 — interface
     SHADOWMILESC / computerizedcarrier2
 
-    clean rebuild: single-declaration header, strict order,
-    zero forward-reference hazards. five tabs:
-      CALLS / REMOTES / DECOMPILER / EXPLORER / TOOLS
-
-    explorer tab opens the dex-style browser window
-    (explorer.lua) wired to the capture engine.
+    v5.1: + CLEANUP section (log / decomp / vault / full wipe)
+          + caches cleared alongside files
+          + STEALTH renumbered
+    five tabs: CALLS / REMOTES / DECOMPILER / EXPLORER / TOOLS
+    explorer tab opens the dex-style browser (explorer.lua).
 ]]
 
-print("[SS2-ui] v5.0 building...")
+print("[SS2-ui] v5.1 building...")
 
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
@@ -118,7 +117,7 @@ hSub.Font = Enum.Font.Code
 hSub.TextSize = 10
 hSub.TextColor3 = T.FAINT
 hSub.TextXAlignment = Enum.TextXAlignment.Left
-hSub.Text = "v5.0"
+hSub.Text = "v5.1"
 hSub.Parent = header
 
 local closeBtn = Instance.new("TextButton")
@@ -477,38 +476,28 @@ local function renderExplorer(force)
         tSection("EXPLORER — RUNNING", 1)
         tLine("", T.DIM, 2)
         tLine("the explorer window is open alongside this panel.", T.TEXT, 3)
-        tLine("drag it anywhere. navigate the game tree, click any", T.DIM, 4)
-        tLine("instance to inspect it. remotes show capture profiles,", T.DIM, 5)
-        tLine("values offer watch, scripts offer decompile.", T.DIM, 6)
-        tLine("", T.DIM, 7)
-        tBtn("RE-FOCUS (nothing to reload)", T.DIM, 8, function() end)
+        tLine("navigate the game tree, click any instance to inspect", T.DIM, 4)
+        tLine("it. remotes show capture profiles, values offer watch,", T.DIM, 5)
+        tLine("scripts offer decompile.", T.DIM, 6)
     else
         tSection("EXPLORER — DEX-STYLE BROWSER", 1)
         tLine("", T.DIM, 2)
         tLine("navigate the game's DataModel, inspect instances,", T.DIM, 3)
         tLine("search game-wide by name.", T.DIM, 4)
         tLine("", T.DIM, 5)
-        tLine("suite integration (dex doesn't have):", T.TEXT, 6)
+        tLine("suite integration:", T.TEXT, 6)
         tLine("  remotes → capture profiles inline", T.DIM, 7)
         tLine("  values  → one-click watch", T.DIM, 8)
         tLine("  scripts → one-click 6-layer decompile", T.DIM, 9)
         tLine("", T.DIM, 10)
-        if explorer.lua_loaded then
-            tBtn("OPEN EXPLORER WINDOW", T.GREEN, 11, function()
-                if SS2.explorer and SS2.explorer.window then
-                    SS2.explorer.window.Enabled = true
-                end
-            end)
-        else
-            tBtn("OPEN EXPLORER WINDOW", T.GREEN, 11, function()
-                -- explorer.lua must be in PARTS; open its window
-                if SS2.explorer and SS2.explorer.window then
-                    SS2.explorer.window.Enabled = true
-                else
-                    tLine("explorer.lua not loaded — add to Load.lua PARTS", T.RED, 12)
-                end
-            end)
-        end
+        tBtn("OPEN EXPLORER WINDOW", T.GREEN, 11, function()
+            if SS2.explorer and SS2.explorer.window then
+                SS2.explorer.window.Enabled = true
+                renderExplorer(true)
+            else
+                tLine("explorer.lua not loaded — add to Load.lua PARTS", T.RED, 12)
+            end
+        end)
     end
 end
 
@@ -534,9 +523,15 @@ local function renderTools(force)
     tBtn("master dump", T.TEXT, 8, function()
         if SS2.dumpAll then SS2.dumpAll() end
     end)
-    tBtn("discovery audit", T.TEXT, 9, function() if SS2.dumpAudit then SS2.dumpAudit() end end)
-    tBtn("per-remote dossiers", T.TEXT, 10, function() if SS2.dumpPerRemote then SS2.dumpPerRemote() end end)
-    tBtn("top call sites (console)", T.TEXT, 11, function() if SS2.topCallers then SS2.topCallers(20) end end)
+    tBtn("discovery audit", T.TEXT, 9, function()
+        if SS2.dumpAudit then SS2.dumpAudit() end
+    end)
+    tBtn("per-remote dossiers", T.TEXT, 10, function()
+        if SS2.dumpPerRemote then SS2.dumpPerRemote() end
+    end)
+    tBtn("top call sites (console)", T.TEXT, 11, function()
+        if SS2.topCallers then SS2.topCallers(20) end
+    end)
 
     tSection("VAULT", 13)
     tBtn("export everything", T.GREEN, 14, function()
@@ -555,23 +550,73 @@ local function renderTools(force)
         if SS2.vaultSummary then print(SS2.vaultSummary()) end
     end)
 
-    tSection("HEALTH", 20)
-    tBtn("capture health report", T.TEXT, 21, function()
-        if SS2.healthReport then SS2.healthReport() end
+    tSection("CLEANUP", 20)
+    tBtn("clear capture log", T.DIM, 21, function()
+        SS2.log = {}
+        lastRenderCount = -1
+        clearContent()
+        tLine("capture log cleared", T.DIM, 1)
     end)
-    tBtn("game vocabulary (console)", T.TEXT, 22, function()
-        if SS2.decomp and SS2.decomp.topConstants then SS2.decomp.topConstants(30) end
+    tBtn("delete decomp dumps", T.RED, 22, function()
+        task.spawn(function()
+            local n = 0
+            pcall(function()
+                local files = listfiles("SimplySpirited/decomp")
+                for _, f in ipairs(files) do
+                    pcall(function() delfile(f) end)
+                    n = n + 1
+                end
+            end)
+            SS2.decompResults = {}
+            print("[cleanup] deleted " .. n .. " decomp files")
+            renderTools(true)
+        end)
+    end)
+    tBtn("delete vault exports", T.RED, 23, function()
+        task.spawn(function()
+            local n = 0
+            pcall(function()
+                local files = listfiles("SimplySpirited/vault")
+                for _, f in ipairs(files) do
+                    pcall(function() delfile(f) end)
+                    n = n + 1
+                end
+            end)
+            SS2.vaultHistory = {}
+            print("[cleanup] deleted " .. n .. " vault files")
+            renderTools(true)
+        end)
+    end)
+    tBtn("WIPE EVERYTHING (decomp+vault+log)", T.RED, 24, function()
+        task.spawn(function()
+            local n = 0
+            for _, folder in ipairs({ "SimplySpirited/decomp", "SimplySpirited/vault" }) do
+                pcall(function()
+                    local files = listfiles(folder)
+                    for _, f in ipairs(files) do
+                        pcall(function() delfile(f) end)
+                        n = n + 1
+                    end
+                end
+            end)
+            SS2.log = {}
+            SS2.decompResults = {}
+            SS2.vaultHistory = {}
+            SS2.decompDB = { constants = {}, scripts = {}, count = 0 }
+            print("[cleanup] FULL WIPE — " .. n .. " files + logs + caches")
+            renderTools(true)
+        end)
     end)
 
-    tSection("STEALTH", 24)
-    tBtn("stealth on / off", T.RED, 25, function()
+    tSection("STEALTH", 27)
+    tBtn("stealth on / off", T.RED, 28, function()
         if SS2.stealth and SS2.stealth.active then
             SS2.stealthOff()
         else
             SS2.stealthOn()
         end
     end)
-    tBtn("self-scan (exposure audit)", T.DIM, 26, function()
+    tBtn("self-scan (exposure audit)", T.DIM, 29, function()
         if SS2.scanSelf then SS2.scanSelf() end
     end)
 end
@@ -628,4 +673,4 @@ end)
 switchTab(1)
 
 SS2.gui = gui
-print("[SS2-ui] v5.0 LIVE — 5 tabs, explorer integrated, clean build")
+print("[SS2-ui] v5.1 LIVE — cleanup integrated, 5 tabs")
