@@ -1,70 +1,32 @@
 --=====================================================================
 --  PROJECT   : SimplySpy
---  FILE      : ui.lua (INTERFACE) - UNIVERSAL BUILD
---  VERSION   : 0.2.0
---
---  PURPOSE   :
---    CoreGui interface for SimplySpy. Log list, detail view,
---    toolbar, status bar, notifications. Degrades gracefully:
---      Tier 1 : CoreGui (survives respawns, hidden from game)
---      Tier 2 : gethui() (executor-specific protected container)
---      Tier 3 : PlayerGui (visible to game code, always works)
---      Tier 4 : console-only (no GUI; SPY.* commands only)
---
---  UNIVERSALITY CONTRACT :
---    - No UI library dependency. Pure Instance construction.
---    - Draggable windows use the legacy .Draggable property with
---      a manual InputBegan/InputEnded fallback if unsupported.
---    - All colors from ctx.theme; no hardcoded palette.
---
---  RESPONSIBILITIES :
---    - Main window: toolbar, capture list, status bar
---    - Detail view: full arg inspection with type colors
---    - Copy button integration with hook.copy
---    - Real-time updates via hook.onCapture callback
---    - Filter and block controls in the toolbar
---
---  MODULE CONTRACT :
---    Receives (deps). Returns this module's public table.
---    deps.hook    (required) : hook module
---    deps.format  (required) : format module
---    deps.ctx     (required) : loader context (theme, gui)
---
---  TARGET    : universal (executors + Studio via adapter)
+--  FILE      : ui.lua (INTERFACE)
+--  VERSION   : 0.3.1
+--  PURPOSE   : CoreGui interface with container fallback ladder
+--              and console-only degradation.
 --  LICENSE   : MIT
 --=====================================================================
 
------------------------------------------------------------------------
--- SECTION 1 : MODULE BOOTSTRAP
------------------------------------------------------------------------
-
 local UI = {}
-
 local log = function() end
 local Hook
 local Format
 local ctx
 
------------------------------------------------------------------------
--- SECTION 2 : STATE
------------------------------------------------------------------------
-
-local gui               -- ScreenGui container
-local mainWindow        -- main window frame
-local listFrame         -- ScrollingFrame holding capture rows
-local listLayout        -- UIListLayout for listFrame
-local statusLabel       -- bottom status bar text
-local filterBox         -- toolbar TextBox
+local gui
+local mainWindow
+local listFrame
+local statusLabel
+local filterBox
 local isShown = false
-local uiTier = 0        -- 1=CoreGui, 2=gethui, 3=PlayerGui, 4=console
-local connectionPool = {} -- all connections, cleaned on shutdown
+local uiTier = 0
+local connectionPool = {}
+local MAX_ROWS = 100
+local detailFrame = nil
 
-local MAX_ROWS = 100    -- max visible rows (perf cap)
-local rowPool = {}      -- reused row frames
-
------------------------------------------------------------------------
--- SECTION 3 : THEME RESOLUTION
------------------------------------------------------------------------
+------------------------------------------------------------------
+-- THEME
+------------------------------------------------------------------
 
 local T
 
@@ -84,51 +46,44 @@ local function resolveTheme()
     }
 end
 
------------------------------------------------------------------------
--- SECTION 4 : CONSTRUCTION HELPERS
------------------------------------------------------------------------
+------------------------------------------------------------------
+-- HELPERS
+------------------------------------------------------------------
 
-local function new(className, props, children)
+local function new(className, props)
     local inst = Instance.new(className)
+    local parent = nil
     for k, v in pairs(props or {}) do
-        if k ~= "Parent" then
+        if k == "Parent" then
+            parent = v
+        else
             inst[k] = v
         end
     end
-    for _, child in ipairs(children or {}) do
-        child.Parent = inst
-    end
-    if props and props.Parent then
-        inst.Parent = props.Parent
-    end
+    if parent then inst.Parent = parent end
     return inst
 end
 
-local function makeCorner(parent, radius)
-    return new("UICorner", { CornerRadius = UDim.new(0, radius or 8), Parent = parent })
+local function corner(parent, r)
+    new("UICorner", { CornerRadius = UDim.new(0, r or 8), Parent = parent })
 end
 
-local function makeStroke(parent, color, thickness)
-    return new("UIStroke", { Color = color, Thickness = thickness or 1, Parent = parent })
+local function stroke(parent, color, thickness)
+    new("UIStroke", { Color = color, Thickness = thickness or 1, Parent = parent })
 end
 
--- Cross-version drag support. Uses .Draggable when present, else
--- falls back to manual InputBegan tracking.
 local function makeDraggable(handle, target)
     local ok = pcall(function()
         handle.Active = true
         handle.Draggable = true
     end)
-    if ok then
-        return
-    end
+    if ok then return end
 
-    -- Manual fallback.
+    -- Manual drag fallback for executors without .Draggable
     local dragging = false
-    local dragStart = nil
-    local startPos = nil
+    local dragStart, startPos
 
-    local inputBegan = handle.InputBegan:Connect(function(input)
+    local b = handle.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1
             or input.UserInputType == Enum.UserInputType.Touch then
             dragging = true
@@ -137,46 +92,42 @@ local function makeDraggable(handle, target)
         end
     end)
 
-    local inputChanged = handle.InputChanged:Connect(function(input)
+    local c = handle.InputChanged:Connect(function(input)
         if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
             local delta = input.Position - dragStart
             target.Position = UDim2.new(
                 startPos.X.Scale, startPos.X.Offset + delta.X,
-                startPos.Y.Scale, startPos.Y.Offset + delta.Y
-            )
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y)
         end
     end)
 
-    local inputEnded = handle.InputEnded:Connect(function(input)
+    local e = handle.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1
             or input.UserInputType == Enum.UserInputType.Touch then
             dragging = false
         end
     end)
 
-    table.insert(connectionPool, inputBegan)
-    table.insert(connectionPool, inputChanged)
-    table.insert(connectionPool, inputEnded)
+    table.insert(connectionPool, b)
+    table.insert(connectionPool, c)
+    table.insert(connectionPool, e)
 end
 
------------------------------------------------------------------------
--- SECTION 5 : CONTAINER RESOLUTION
------------------------------------------------------------------------
+------------------------------------------------------------------
+-- CONTAINER RESOLUTION (tier ladder)
+------------------------------------------------------------------
 
 local function resolveContainer()
-    -- Tier 1: CoreGui.
     local ok = pcall(function()
-        local core = game:GetService("CoreGui")
         local test = Instance.new("ScreenGui")
         test.Name = "SimplySpy_Probe"
-        test.Parent = core
+        test.Parent = game:GetService("CoreGui")
         test:Destroy()
     end)
     if ok then
         return game:GetService("CoreGui"), 1
     end
 
-    -- Tier 2: gethui().
     if type(gethui) == "function" then
         local ok2, container = pcall(gethui)
         if ok2 and container then
@@ -184,7 +135,6 @@ local function resolveContainer()
         end
     end
 
-    -- Tier 3: PlayerGui.
     local player = game:GetService("Players").LocalPlayer
     if player then
         local pg = player:FindFirstChild("PlayerGui")
@@ -196,12 +146,9 @@ local function resolveContainer()
     return nil, 4
 end
 
------------------------------------------------------------------------
--- SECTION 6 : ROW CONSTRUCTION
------------------------------------------------------------------------
--- Rows are pooled: a fixed set of row frames is created once and
--- recycled as captures arrive. This keeps the list at O(1) per
--- capture regardless of buffer size.
+------------------------------------------------------------------
+-- ROWS (pooled)
+------------------------------------------------------------------
 
 local function makeRow()
     local row = new("TextButton", {
@@ -214,7 +161,7 @@ local function makeRow()
         AutoButtonColor = false,
         Parent = listFrame,
     })
-    makeCorner(row, 4)
+    corner(row, 4)
 
     local label = new("TextLabel", {
         Name = "Label",
@@ -234,96 +181,54 @@ local function makeRow()
     return row
 end
 
-local function getRow()
-    local row = table.remove(rowPool)
-    if not row then
-        if #rowPool >= MAX_ROWS then
-            return nil
-        end
-        row = makeRow()
-    end
-    return row
-end
-
-local function releaseRow(row)
-    table.insert(rowPool, row)
-end
-
------------------------------------------------------------------------
--- SECTION 7 : LIST REFRESH
------------------------------------------------------------------------
+------------------------------------------------------------------
+-- LIST REFRESH
+------------------------------------------------------------------
 
 local function refreshList()
-    if not isShown then
-        return
-    end
+    if not isShown or not listFrame then return end
 
-    -- Gather the most recent captures.
     local captures = Hook.getRecent(MAX_ROWS)
 
-    -- Recycle rows.
-    for _, row in ipairs(listFrame:GetChildren()) do
-        if row.Name == "Row" then
-            row.Visible = false
-            row.Active = false
-            row.BackgroundColor3 = T.Card
+    for _, child in ipairs(listFrame:GetChildren()) do
+        if child.Name == "Row" then
+            child.Visible = false
         end
     end
 
-    -- Populate.
-    for i, capture in ipairs(captures) do
-        local row = getRow()
+    local visible = 0
+    for i = #captures, 1, -1 do
+        local capture = captures[i]
+        local row = listFrame:FindFirstChild("Row" .. capture.id)
         if not row then
-            break
+            if visible >= MAX_ROWS then break end
+            row = makeRow()
+            row.Name = "Row" .. capture.id
+            row.MouseButton1Click:Connect(function()
+                UI.showDetail(capture.id)
+            end)
         end
-
         row.Visible = true
-        row.Active = true
+        row.LayoutOrder = capture.id
         row.Label.Text = string.format("[%d] %s",
             capture.id, Format.callToLine(capture))
-        row.Label.TextColor3 = T.TextSecondary
-
-        row.LayoutOrder = capture.id
-
-        -- Click behavior bound once at row creation.
-        if not row._bound then
-            row.MouseButton1Click:Connect(function()
-                if row._captureId then
-                    UI.showDetail(row._captureId)
-                end
-            end)
-            row._bound = true
-        end
-        row._captureId = capture.id
+        visible = visible + 1
     end
 
-    -- Update the canvas size to fit content.
-    local rowCount = 0
-    for _, row in ipairs(listFrame:GetChildren()) do
-        if row.Name == "Row" and row.Visible then
-            rowCount = rowCount + 1
-        end
-    end
-    listFrame.CanvasSize = UDim2.new(0, 0, 0, rowCount * 28)
+    listFrame.CanvasSize = UDim2.new(0, 0, 0, visible * 28)
 
-    -- Status bar.
-    statusLabel.Text = string.format("%d captured | filter: %s",
-        Hook.count(), Hook.getFilterName and Hook.getFilterName() or "none")
+    statusLabel.Text = string.format("%d captured | tier %d",
+        Hook.count(), uiTier)
 end
 
------------------------------------------------------------------------
--- SECTION 8 : DETAIL VIEW
------------------------------------------------------------------------
-
-local detailFrame = nil
+------------------------------------------------------------------
+-- DETAIL VIEW
+------------------------------------------------------------------
 
 function UI.showDetail(id)
     local capture = Hook.getById(id)
-    if not capture then
-        return
-    end
+    if not capture then return end
 
-    -- Destroy any previous detail window.
     if detailFrame then
         detailFrame:Destroy()
         detailFrame = nil
@@ -332,21 +237,20 @@ function UI.showDetail(id)
     detailFrame = new("Frame", {
         Name = "DetailWindow",
         Size = UDim2.fromOffset(480, 420),
-        Position = UDim2.new(0.5, 260, 0.5, 0),
+        Position = UDim2.new(0.5, 250, 0.5, 0),
         AnchorPoint = Vector2.new(0, 0.5),
         BackgroundColor3 = T.Card,
         BorderSizePixel = 0,
         Parent = gui,
     })
-    makeCorner(detailFrame, 10)
-    makeStroke(detailFrame, T.CardBorder)
+    corner(detailFrame, 10)
+    stroke(detailFrame, T.CardBorder)
 
-    -- Title bar.
-    local title = new("TextLabel", {
+    new("TextLabel", {
         Size = UDim2.new(1, -90, 0, 32),
-        Position = UDim2.new(0, 14,  window = nil, 0, 14),
+        Position = UDim2.new(0, 14, 0, 14),
         BackgroundTransparency = 1,
-Position = UDim2.new(0, 14, 0, 14),
+        Text = string.format("Capture #%d", capture.id),
         TextColor3 = T.TextPrimary,
         TextSize = 16,
         Font = Enum.Font.GothamBold,
@@ -354,8 +258,7 @@ Position = UDim2.new(0, 14, 0, 14),
         Parent = detailFrame,
     })
 
-    -- Close button.
-    local close = new("TextButton", {
+    local closeBtn = new("TextButton", {
         Size = UDim2.fromOffset(70, 26),
         Position = UDim2.new(1, -84, 0, 14),
         BackgroundColor3 = T.Error,
@@ -366,14 +269,13 @@ Position = UDim2.new(0, 14, 0, 14),
         Font = Enum.Font.GothamMedium,
         Parent = detailFrame,
     })
-    makeCorner(close, 6)
-    close.MouseButton1Click:Connect(function()
+    corner(closeBtn, 6)
+    closeBtn.MouseButton1Click:Connect(function()
         detailFrame:Destroy()
         detailFrame = nil
     end)
 
-    -- Copy button.
-    local copy = new("TextButton", {
+    local copyBtn = new("TextButton", {
         Size = UDim2.fromOffset(70, 26),
         Position = UDim2.new(1, -84, 0, 48),
         BackgroundColor3 = T.Accent,
@@ -384,12 +286,11 @@ Position = UDim2.new(0, 14, 0, 14),
         Font = Enum.Font.GothamMedium,
         Parent = detailFrame,
     })
-    makeCorner(copy, 6)
-    copy.MouseButton1Click:Connect(function()
+    corner(copyBtn, 6)
+    copyBtn.MouseButton1Click:Connect(function()
         Hook.copy(capture.id)
     end)
 
-    -- Args list.
     local argsList = new("ScrollingFrame", {
         Size = UDim2.new(1, -28, 1, -120),
         Position = UDim2.new(0, 14, 0, 88),
@@ -399,9 +300,9 @@ Position = UDim2.new(0, 14, 0, 14),
         CanvasSize = UDim2.new(0, 0, 0, 0),
         Parent = detailFrame,
     })
-    makeCorner(argsList, 6)
+    corner(argsList, 6)
 
-    local argsLayout = new("UIListLayout", {
+    new("UIListLayout", {
         Padding = UDim.new(0, 2),
         SortOrder = Enum.SortOrder.LayoutOrder,
         Parent = argsList,
@@ -409,32 +310,31 @@ Position = UDim2.new(0, 14, 0, 14),
 
     local yOffset = 0
     for i, arg in ipairs(capture.args) do
+        local text = string.format("[%d] %s", i, Format.display(arg))
+        local height = 20
+        if #text > 60 then
+            height = 20 + math.floor(#text / 60) * 16
+        end
+
         local argLabel = new("TextLabel", {
-            Size = UDim2.new(1, -12, 0, 20),
+            Size = UDim2.new(1, -12, 0, height),
             BackgroundTransparency = 1,
-            Text = string.format("[%d] %s", i, Format.display(arg)),
-            TextColor3 = Format.colorFor(arg),
+            Text = text,
+            TextColor3 = Format.colorFor and Format.colorFor(arg)
+                or T.TextSecondary,
             TextSize = 12,
             Font = Enum.Font.Gotham,
             TextXAlignment = Enum.TextXAlignment.Left,
-            TextTruncate = Enum.TextTruncate.AtEnd,
+            TextWrapped = #text > 60,
             LayoutOrder = i,
             Parent = argsList,
         })
-
-        -- Auto-expand rows with long text (text height estimation).
-        local textLen = #argLabel.Text
-        if textLen > 60 then
-            argLabel.TextWrapped = true
-            argLabel.Size = UDim2.new(1, -12, 0, 20 + math.floor(textLen / 60) * 16)
-        end
-        yOffset = yOffset + argLabel.Size.Y.Offset + 2
+        yOffset = yOffset + height + 2
     end
 
     argsList.CanvasSize = UDim2.new(0, 0, 0, yOffset + 8)
 
-    -- Remote path display.
-    local pathLabel = new("TextLabel", {
+    new("TextLabel", {
         Size = UDim2.new(1, -28, 0, 30),
         Position = UDim2.new(0, 14, 1, -44),
         BackgroundTransparency = 1,
@@ -448,9 +348,9 @@ Position = UDim2.new(0, 14, 0, 14),
     })
 end
 
------------------------------------------------------------------------
--- SECTION 9 : MAIN WINDOW CONSTRUCTION
------------------------------------------------------------------------
+------------------------------------------------------------------
+-- MAIN WINDOW
+------------------------------------------------------------------
 
 local function buildMainWindow()
     mainWindow = new("Frame", {
@@ -459,12 +359,13 @@ local function buildMainWindow()
         Position = UDim2.new(0.5, -220, 0.5, -240),
         BackgroundColor3 = T.Card,
         BorderSizePixel = 0,
+        Visible = false,
         Parent = gui,
     })
-    makeCorner(mainWindow, 10)
-    makeStroke(mainWindow, T.CardBorder)
+    corner(mainWindow, 10)
+    stroke(mainWindow, T.CardBorder)
 
-    -- Title bar.
+    -- Title bar
     local titleBar = new("Frame", {
         Name = "TitleBar",
         Size = UDim2.new(1, 0, 0, 40),
@@ -472,26 +373,24 @@ local function buildMainWindow()
         BorderSizePixel = 0,
         Parent = mainWindow,
     })
-    makeCorner(titleBar, 10)
+    corner(titleBar, 10)
 
-    local title = new("TextLabel", {
+    new("TextLabel", {
         Size = UDim2.new(1, -60, 1, 0),
         Position = UDim2.new(0, 14, 0, 0),
         BackgroundTransparency = 1,
         Text = "SimplySpy",
         TextColor3 = T.TextPrimary,
-        Text = "SimplySpy",
         TextSize = 16,
         Font = Enum.Font.GothamBold,
         TextXAlignment = Enum.TextXAlignment.Left,
         Parent = titleBar,
     })
 
-    local versionLabel = new("TextLabel", {
+    new("TextLabel", {
         Size = UDim2.new(0, 60, 1, 0),
         Position = UDim2.new(1, -60, 0, 0),
         BackgroundTransparency = 1,
-        Tier = nil,
         Text = "v" .. tostring(ctx and ctx.version or "?"),
         TextColor3 = T.TextFaint,
         TextSize = 11,
@@ -502,11 +401,10 @@ local function buildMainWindow()
 
     makeDraggable(titleBar, mainWindow)
 
-    -- Toolbar.
+    -- Toolbar
     local toolbar = new("Frame", {
         Name = "Toolbar",
         Size = UDim2.new(1, 0, 0, 36),
-        Position = UVertex2 = nil,
         Position = UDim2.new(0, 0, 0, 40),
         BackgroundColor3 = T.Background,
         BorderSizePixel = 0,
@@ -527,15 +425,14 @@ local function buildMainWindow()
         ClearTextOnFocus = false,
         Parent = toolbar,
     })
-    makeCorner(filterBox, 4)
+    corner(filterBox, 4)
 
     filterBox.FocusLost:Connect(function(enterPressed)
         if enterPressed then
-            local text = filterBox.Text
-            if text == "" then
+            if filterBox.Text == "" then
                 Hook.setFilter(nil)
             else
-                Hook.setFilter(text)
+                Hook.setFilter(filterBox.Text)
             end
             refreshList()
         end
@@ -548,18 +445,17 @@ local function buildMainWindow()
         BorderSizePixel = 0,
         Text = "Clear",
         TextColor3 = T.TextPrimary,
-        TextAsScale = nil,
         TextSize = 12,
         Font = Enum.Font.GothamMedium,
         Parent = toolbar,
     })
-    makeCorner(btnClear, 4)
+    corner(btnClear, 4)
     btnClear.MouseButton1Click:Connect(function()
         Hook.clear()
         refreshList()
     end)
 
-    -- Capture list.
+    -- Capture list
     listFrame = new("ScrollingFrame", {
         Name = "CaptureList",
         Size = UDim2.new(1, -20, 1, -140),
@@ -570,15 +466,15 @@ local function buildMainWindow()
         CanvasSize = UDim2.new(0, 0, 0, 0),
         Parent = mainWindow,
     })
-    makeCorner(listFrame, 6)
+    corner(listFrame, 6)
 
-    listLayout = new("UIListLayout", {
+    new("UIListLayout", {
         Padding = UDim.new(0, 2),
         SortOrder = Enum.SortOrder.LayoutOrder,
         Parent = listFrame,
     })
 
-    -- Status bar.
+    -- Status bar
     statusLabel = new("TextLabel", {
         Name = "Status",
         Size = UDim2.new(1, -20, 0, 20),
@@ -593,21 +489,17 @@ local function buildMainWindow()
     })
 end
 
------------------------------------------------------------------------
--- SECTION 10 : REAL-TIME UPDATES
------------------------------------------------------------------------
--- The hook module calls UI.onCapture when a new capture arrives.
--- Refreshes are throttled to one per 0.1 seconds to avoid frame
--- drops during remote-heavy games.
+------------------------------------------------------------------
+-- REAL-TIME UPDATES (throttled)
+------------------------------------------------------------------
 
 local refreshQueued = false
 local lastRefresh = 0
 
-local function onCapture(capture)
-    if not isShown then
-        return
-    end
-    if os.clock() - lastRefresh < 0.1 then
+local function onCapture()
+    if not isShown then return end
+    local now = os.clock()
+    if now - lastRefresh < 0.1 then
         if not refreshQueued then
             refreshQueued = true
             task.delay(0.1, function()
@@ -618,22 +510,22 @@ local function onCapture(capture)
         end
         return
     end
-    lastRefresh = os.clock()
+    lastRefresh = now
     refreshList()
 end
 
------------------------------------------------------------------------
--- SECTION 11 : PUBLIC API
------------------------------------------------------------------------
+------------------------------------------------------------------
+-- PUBLIC API
+------------------------------------------------------------------
 
 function UI.init(deps)
-    log = deps.log or log
-    Hook = deps.hook
-    Format = deps.format
-    ctx = deps.ctx
+    log = (deps and deps.log) or log
+    Hook = deps and deps.hook
+    Format = deps and deps.format
+    ctx = deps and deps.ctx
 
     if not Hook or not Format then
-        return false, "missing dependencies (hook, format)"
+        return false, "missing dependencies"
     end
 
     resolveTheme()
@@ -642,8 +534,8 @@ function UI.init(deps)
     uiTier = tier
 
     if tier == 4 then
-        log("WARN", "no GUI container available; console mode only")
-        return true -- UI init succeeds; show() is a no-op
+        log("WARN", "no GUI container; console mode only")
+        return true
     end
 
     gui = Instance.new("ScreenGui")
@@ -654,9 +546,7 @@ function UI.init(deps)
     gui.Parent = container
 
     buildMainWindow()
-    isShown = false -- show() must be called explicitly
 
-    -- Wire the hook callback.
     Hook.onCapture = onCapture
 
     log("INFO", "ui online (tier " .. tier .. ")")
@@ -703,20 +593,19 @@ function UI.shutdown()
         Hook.onCapture = nil
     end
     isShown = false
-    log("INFO", "ui offline")
 end
 
------------------------------------------------------------------------
--- SECTION 12 : MODULE CONTRACT
------------------------------------------------------------------------
+------------------------------------------------------------------
+-- MODULE CONTRACT
+------------------------------------------------------------------
 
 return function(deps)
     local ok, result = pcall(UI.init, deps)
     if not ok then
-        error("SimplySpy ui init failed: " .. tostring(result))
+        error("ui init crashed: " .. tostring(result))
     end
     if result == false then
-        error("SimplySpy ui init returned false (see logs)")
+        error("ui init failed: " .. tostring((deps and deps.log) and "see logs" or result))
     end
     return UI
 end
