@@ -19,20 +19,16 @@ local REPO = "https://raw.githubusercontent.com/randomguy454/simplyspirited/refs
 
 local PARTS = {
     { file = "core.lua",     name = "ENGINE",       required = true  },
-    { file = "closure.lua",  name = "CLOSURE",      required = false },
     { file = "callers.lua",  name = "CALLERS",      required = false },
-    { file = "watch.lua",    name = "SURVEILLANCE", required = false },
     { file = "ui.lua",       name = "INTERFACE",    required = true  },
     { file = "output.lua",   name = "OUTPUT",       required = false },
     { file = "governor.lua", name = "GOVERNOR",     required = false },
     { file = "stealth.lua",  name = "STEALTH",      required = false },
-    { file = "describe_ext.lua", name = "ARG FIDELITY", required = false },
     { file = "decomp.lua",   name = "DECOMPILER",   required = false },
     { file = "export.lua",   name = "VAULT",        required = false },
     { file = "vault2.lua",   name = "VAULT 2",      required = false },
     { file = "ss_dump.lua",  name = "GAME DUMP",    required = false },
 }
-
 -- ═══ CLEAN STATE WIPE ═══
 getgenv().SS2 = nil
 getgenv().SS2_READY = nil
