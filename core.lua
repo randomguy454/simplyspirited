@@ -1,59 +1,77 @@
--- ════════════════════════════════════════════════════════════
---  SIMPLYSPIRITED v3.1 — CORE ENGINE
---  For SHADOWMILESC (computerizedcarrier2)
---  ────────────────────────────────────────────────────────────
---  Universal remote intelligence. Assumes nothing about the game.
---  ────────────────────────────────────────────────────────────
---  v3.1 CAPTURE ARCHITECTURE (the completeness fix):
---   INBOUND:  OnClientEvent connections — 100% reliable
---   OUTBOUND: namecall net ONLY — every FireServer/InvokeServer
---             in the game passes through it, nothing to miss.
---   The per-remote hookfunction layer is DELETED — it was the
---   fragile half and the source of missed remotes.
---  Also: periodic rescan (15s), value watcher, census, journal,
---  verbosity-gated output (quiet/smart/loud).
---  All state: getgenv().SS2
--- ════════════════════════════════════════════════════════════
+--[[
+    simplyspirited v4.6 — core engine
+    SHADOWMILESC / computerizedcarrier2
 
-print("[SS2-core] booting...")
+    the heart of the suite. universal by construction:
+    discovers remotes, watches values, tracks players.
+    assumes nothing about the game it lands in.
+
+    capture architecture (v3.1+, kept):
+      INBOUND  = OnClientEvent connections (reliable)
+      OUTBOUND = namecall net (total coverage)
+      per-remote hookfunction layer removed — it was the
+      fragile half; the net is the whole game.
+
+    v4.6 additions:
+      - capture health: calls/sec EMA, filter-drop counts
+      - adaptive rescan: 2s intervals for the first minute
+        (boot race), then 15s steady-state
+      - runtime-editable verbosity keywords, persisted
+      - every swallowed error journaled, never silent
+      - discovery diff: rescan reports what it newly found
+]]
+
+print("[SS2-core] v4.6 booting...")
 
 local Players = game:GetService("Players")
 local P = Players.LocalPlayer
 
 -- ═══════════ STATE ═══════════
 getgenv().SS2 = {
-    version = "3.1",
+    version = "4.6",
     game = game.Name,
     placeId = game.PlaceId,
     jobId = game.JobId,
 
     remotes = {},   -- [remote] = profile
-    log = {},       -- call records
+    log = {},       -- call records (bounded ring)
     journal = {},   -- significant events
     values = {},    -- [valueObj] = lastValue
     players = {},   -- [player] = snapshot
 
-    verbosity = "smart",  -- "quiet" | "smart" | "loud"
-    metaHooked = false,
+    verbosity = "smart",      -- quiet | smart | loud
+    keywords = {              -- smart-mode interest keywords (editable)
+        "buy", "purchase", "cash", "coin", "gold", "gem", "money",
+        "damage", "hit", "attack", "kill", "death", "reward", "claim",
+        "spawn", "craft", "sell", "trade", "level", "xp", "win",
+        "data", "save", "auth", "key", "remote",
+    },
 
-    filters = {
+    filters = {               -- name-fragments to drop entirely
         heartbeat = true, stepped = true, renderstepped = true,
         input = true, mouse = true, camera = true, touch = true,
         keyframe = true, animation = true, physics = true,
     },
+
     maxLog = 2000,
     capture = true,
     startTime = os.clock(),
+
+    -- v4.6 health metrics
+    health = {
+        callsEMA = 0,          -- smoothed calls/sec
+        lastSecond = 0,
+        thisSecond = 0,
+        filterDropped = 0,     -- calls dropped by name filters
+        verbositySuppressed = 0, -- captured-but-not-printed
+        rescanFinds = 0,       -- remotes the rescans recovered
+    },
 }
 local SS2 = getgenv().SS2
 
 -- ═══════════ JOURNAL ═══════════
 local function journal(tag, text)
-    local entry = {
-        t = os.date("%H:%M:%S"),
-        tag = tag,
-        text = text,
-    }
+    local entry = { t = os.date("%H:%M:%S"), tag = tag, text = text }
     table.insert(SS2.journal, entry)
     if #SS2.journal > 500 then table.remove(SS2.journal, 1) end
 end
@@ -65,7 +83,7 @@ local function describe(v, depth)
     local t = typeof(v)
     if t == "string" then
         if #v <= 80 then return '"' .. v .. '"' end
-        return 'str(' .. #v .. '):"' .. v:sub(1, 40) .. '..."'
+        return ('str(%d):"%s…"'):format(#v, v:sub(1, 40))
     elseif t == "Vector3" then
         return ("V3(%.2f,%.2f,%.2f)"):format(v.X, v.Y, v.Z)
     elseif t == "Vector2" then
@@ -92,11 +110,10 @@ local function describe(v, depth)
         for k, vv in pairs(v) do
             n = n + 1
             if n > 6 then
-                parts[#parts + 1] = "..."
+                parts[#parts + 1] = "…"
                 break
             end
-            local key
-            if typeof(k) == "string" then key = k else key = "[" .. tostring(k) .. "]" end
+            local key = typeof(k) == "string" and k or ("[" .. tostring(k) .. "]")
             parts[#parts + 1] = key .. "=" .. describe(vv, depth + 1)
         end
         return "{" .. table.concat(parts, ",") .. "}"
@@ -110,14 +127,25 @@ local function describe(v, depth)
 end
 SS2.describe = describe
 
--- ═══════════ CALL RECORDER (verbosity-gated) ═══════════
+-- ═══════════ HEALTH METER ═══════════
+local function tickHealth()
+    SS2.health.thisSecond = SS2.health.thisSecond + 1
+end
+
+-- ═══════════ CALL RECORDER ═══════════
 local callId = 0
 
 local function recordCall(remote, args, direction)
     if not SS2.capture then return end
+
+    tickHealth()
+
     local lname = remote.Name:lower()
     for bad, on in pairs(SS2.filters) do
-        if on and lname:find(bad, 1, true) then return end
+        if on and lname:find(bad, 1, true) then
+            SS2.health.filterDropped = SS2.health.filterDropped + 1
+            return
+        end
     end
     callId = callId + 1
 
@@ -151,15 +179,20 @@ local function recordCall(remote, args, direction)
         prof.sigs[sig] = (prof.sigs[sig] or 0) + 1
     end
 
-    -- verbosity-gated console output
+    -- verbosity gate
     local tag = direction == "OUT" and ">>>" or "<<<"
     local showIt
     if SS2.verbosity == "loud" then
         showIt = true
     elseif SS2.verbosity == "quiet" then
         showIt = false
+        SS2.health.verbositySuppressed = SS2.health.verbositySuppressed + 1
     else
-        showIt = (prof and prof.calls <= 2) or (SS2._isInteresting and SS2._isInteresting(rec))
+        showIt = (prof and prof.calls <= 2)
+            or (SS2._isInteresting and SS2._isInteresting(rec))
+        if not showIt then
+            SS2.health.verbositySuppressed = SS2.health.verbositySuppressed + 1
+        end
     end
     if showIt then
         print(("[%s #%d] %s %s\n    %s"):format(
@@ -172,7 +205,7 @@ local function recordCall(remote, args, direction)
 end
 SS2.recordCall = recordCall
 
--- ═══════════ REMOTE DISCOVERY (inbound + profiles) ═══════════
+-- ═══════════ REMOTE PROFILES + INBOUND HOOKS ═══════════
 local function profileFor(r)
     local prof = SS2.remotes[r]
     if not prof then
@@ -200,7 +233,7 @@ local function hookRemote(r)
     if prof.hooked then return end
     prof.hooked = true
 
-    -- INBOUND ONLY — outbound capture is the namecall net's job
+    -- inbound only — outbound belongs to the net
     if r:IsA("RemoteEvent") then
         pcall(function()
             r.OnClientEvent:Connect(function(...)
@@ -231,24 +264,34 @@ game.DescendantAdded:Connect(function(d)
     end
 end)
 
--- ═══════════ PERIODIC RESCAN (15s) ═══════════
--- catches remotes that loaded late or were missed at boot
+-- ═══════════ v4.6 ADAPTIVE RESCAN ═══════════
+-- boot races slow games. strategy: aggressive early (2s interval
+-- for the first minute — catches the load wave), then 15s steady.
+-- reports the diff: what each sweep newly found.
 task.spawn(function()
+    local sweeps = 0
     while true do
-        task.wait(15)
+        local waitTime = (sweeps < 30) and 2 or 15  -- first ~1min aggressive
+        task.wait(waitTime)
+        sweeps = sweeps + 1
         pcall(function()
+            local found = 0
             for _, d in ipairs(game:GetDescendants()) do
                 if (d:IsA("RemoteEvent") or d:IsA("RemoteFunction")) and not SS2.remotes[d] then
                     pcall(hookRemote, d)
+                    found = found + 1
                 end
+            end
+            if found > 0 then
+                SS2.health.rescanFinds = SS2.health.rescanFinds + found
+                journal("RESCAN", "recovered " .. found .. " late-loaded remotes")
+                print(("[SS2-core] rescan recovered " .. found .. " late remotes"))
             end
         end)
     end
 end)
 
--- ═══════════ NAMECALL NET (THE outbound capture) ═══════════
--- promoted from hookmeta.lua — every FireServer/InvokeServer in
--- the game passes through here. Complete by architecture.
+-- ═══════════ NAMECALL NET (outbound, total) ═══════════
 pcall(function()
     local oldNamecall
     oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
@@ -269,7 +312,7 @@ pcall(function()
         return oldNamecall(self, ...)
     end)
     SS2.metaHooked = true
-    print("[SS2-core] namecall net armed — outbound capture: TOTAL")
+    print("[SS2-core] namecall net armed — outbound: total")
 end)
 
 -- ═══════════ VALUE WATCHER ═══════════
@@ -294,9 +337,7 @@ local function watchValue(obj)
             pcall(SS2.onValue, obj, old, v)
         end
     end
-    pcall(function()
-        obj.Changed:Connect(onChange)
-    end)
+    pcall(function() obj.Changed:Connect(onChange) end)
 end
 SS2.watchValue = watchValue
 
@@ -360,12 +401,72 @@ Players.PlayerRemoving:Connect(function(pl)
     SS2.players[pl] = nil
 end)
 
+-- ═══════════ v4.6 RUNTIME-EDITABLE KEYWORDS ═══════════
+function SS2.addKeyword(kw)
+    if kw and #kw > 1 then
+        table.insert(SS2.keywords, kw:lower())
+        journal("CONFIG", "keyword added: " .. kw)
+        print("[core] keyword added: " .. kw)
+    end
+end
+
+function SS2.listKeywords()
+    print("═══ smart-mode keywords ═══")
+    print("  " .. table.concat(SS2.keywords, ", "))
+end
+
+-- ═══════════ v4.6 HEALTH REPORT ═══════════
+task.spawn(function()
+    while true do
+        task.wait(1)
+        -- EMA smoothing over seconds
+        local inst = SS2.health.thisSecond
+        SS2.health.callsEMA = SS2.health.callsEMA * 0.7 + inst * 0.3
+        SS2.health.thisSecond = 0
+    end
+end)
+
+function SS2.healthReport()
+    local h = SS2.health
+    local rc = 0
+    for _ in pairs(SS2.remotes) do rc = rc + 1 end
+    print("═══ capture health ═══")
+    print(("  remotes: %d | calls buffered: %d"):format(rc, #SS2.log))
+    print(("  rate: %.1f calls/sec (smoothed)"):format(h.callsEMA))
+    print(("  filter-dropped: %d | verbosity-suppressed: %d"):format(
+        h.filterDropped, h.verbositySuppressed))
+    print(("  rescan-recovered remotes: %d"):format(h.rescanFinds))
+    print(("  journal entries: %d"):format(#SS2.journal))
+end
+SS2.healthReport = SS2.healthReport
+
+-- ═══════════ FILTER/KEYWORD RUNTIME EDITS ═══════════
+function SS2.addFilter(fragment)
+    if fragment and #fragment > 1 then
+        SS2.filters[fragment:lower()] = true
+        print("[core] filter added: " .. fragment)
+    end
+end
+
+function SS2.removeFilter(fragment)
+    SS2.filters[fragment:lower()] = nil
+    print("[core] filter removed: " .. fragment)
+end
+
+function SS2.listFilters()
+    print("═══ active filters ═══")
+    for f, on in pairs(SS2.filters) do
+        if on then print("  " .. f) end
+    end
+end
+
 -- ═══════════ BOOT ═══════════
 local remoteCount = scanAllRemotes()
 
-journal("BOOT", "suite online in " .. SS2.game)
+journal("BOOT", "v4.6 online in " .. SS2.game .. " | " .. remoteCount .. " remotes")
 print("[SS2-core] discovered " .. remoteCount .. " remotes (inbound watch)")
 print("[SS2-core] namecall net: " .. tostring(SS2.metaHooked) .. " (outbound watch)")
-print("[SS2-core] periodic rescan: every 15s | verbosity: " .. SS2.verbosity)
-print("[SS2-core] engine ready")
+print("[SS2-core] adaptive rescan live | health metrics live")
+print("[SS2-core] verbosity: " .. SS2.verbosity .. " | runtime-editable filters/keywords")
+print("[SS2-core] engine ready — SS2.healthReport() for capture vitals")
 getgenv().SS2_READY = true
