@@ -5,20 +5,21 @@
     one line, any game:
     loadstring(game:HttpGet(".../Load.lua?nocache=" .. os.time()))()
 
-    the splash IS the boot report: parts check in live, failures
-    are named with reasons, and the bar completes when the suite
-    is ready. the splash then hands off to ui.lua's window.
+    load order = wrapper nesting. the order below is deliberate:
+      core       (logic, innermost)
+      governor   (rate gate)
+      callers    (attribution — outermost wrapper, ungated)
+      closure    (function forensics, describes patched)
+      watch      (engine functions: replay, presets, docs)
+      ui         (display)
+      output-tier modules (stealth, describe_ext)
+      intel tiers (decomp, export, ss_dump)
 
-    parts (13):
-      ENGINE → CLOSURE → CALLERS → SURVEILLANCE → INTERFACE →
-      GOVERNOR → STEALTH → ARG FIDELITY → DECOMPILER → VAULT →
-      GAME DUMP
-
-    required parts halt cleanly with the reason. optional parts
-    degrade the suite, never kill it.
+    the splash is the boot report: live lines, named failures,
+    halt-on-required, progress bar, clean handoff to the ui.
 ]]
 
--- ═══ splash: instant feedback before the first fetch ═══
+-- ═══ splash ═══
 local Players = game:GetService("Players")
 local P = Players.LocalPlayer
 local UIS = game:GetService("UserInputService")
@@ -48,7 +49,6 @@ win.BorderSizePixel = 0
 win.Active = true
 win.Parent = gui
 
--- drag
 local dragging, dStart, dPos = false, nil, nil
 local hdr = Instance.new("Frame")
 hdr.Size = UDim2.new(1, 0, 0, 22)
@@ -85,7 +85,6 @@ UIS.InputEnded:Connect(function()
     dragging = false
 end)
 
--- log lines
 local logFrame = Instance.new("Frame")
 logFrame.Size = UDim2.new(1, -16, 1, -66)
 logFrame.Position = UDim2.fromOffset(8, 30)
@@ -119,7 +118,6 @@ local function addLine(text, color)
     end
 end
 
--- progress bar
 local barBG = Instance.new("Frame")
 barBG.Size = UDim2.new(1, -16, 0, 4)
 barBG.Position = UDim2.new(0, 8, 1, -24)
@@ -152,11 +150,11 @@ local REPO = "https://raw.githubusercontent.com/randomguy454/simplyspirited/refs
 
 local PARTS = {
     { file = "core.lua",         name = "ENGINE",       required = true  },
-    { file = "closure.lua",      name = "CLOSURE",      required = false },
+    { file = "governor.lua",     name = "GOVERNOR",     required = false },
     { file = "callers.lua",      name = "CALLERS",      required = false },
+    { file = "closure.lua",      name = "CLOSURE",      required = false },
     { file = "watch.lua",        name = "SURVEILLANCE", required = false },
     { file = "ui.lua",           name = "INTERFACE",    required = true  },
-    { file = "governor.lua",     name = "GOVERNOR",     required = false },
     { file = "stealth.lua",      name = "STEALTH",      required = false },
     { file = "describe_ext.lua", name = "ARG FIDELITY", required = false },
     { file = "decomp.lua",       name = "DECOMPILER",   required = false },
@@ -168,6 +166,7 @@ local PARTS = {
 getgenv().SS2 = nil
 getgenv().SS2_READY = nil
 getgenv().SS2_UI = nil
+getgenv().SIMPLYSPIRITED_V2 = nil
 
 -- ═══ LOAD SEQUENCE ═══
 local loaded, failed = 0, {}
@@ -247,7 +246,7 @@ else
     return
 end
 
--- fingerprint
+-- ═══ FINGERPRINT ═══
 local SS2 = getgenv().SS2
 if SS2 then
     SS2.sessionStart = os.date()
