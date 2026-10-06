@@ -1,22 +1,64 @@
 --=====================================================================
---  PROJECT   : SimplySpy
---  FILE      : loader.lua
---  VERSION   : 0.1.0
---  REPO      : randomguy454/simplyspirited
---
---  PURPOSE   :
---    Bootstrap entry point. Renders a CoreGui loading interface,
---    fetches the remote payload with retry and backoff, validates
---    it without executing, then hands control to the runtime with
---    an animated transition.
---
---  USAGE     :
---    loadstring(game:HttpGet(
---      "https://raw.githubusercontent.com/randomguy454/simplyspirited/main/loader.lua"
---    ))()
---
---  TARGET    : UNC-compatible Roblox script executors
---  LICENSE   : MIT
+--=====================================================================
+--                                                                    --
+--   ____  _                   _____         _                        --
+--  / ___|(_)_ __ ___  _   _|  ___|_  ___ | |_                      --
+--  \___ \| | '_ ` _ \| | | | |_  \ \/ / '| __|                     --
+--   ___) | | | | | | | |_| |  _| | >  <| | |_                      --
+--  |____/|_|_| |_| |_|\__, |_|  \_/_/\_\  \__|                     --
+--                      |___/                                        --
+--                                                                    --
+--  BOOTSTRAP LOADER                                                 --
+--  ================                                                 --
+--                                                                    --
+--  The single public entry point of SimplySpy. Users execute one    --
+--  line:                                                             --
+--                                                                    --
+--    loadstring(game:HttpGet(                                        --
+--      "https://raw.githubusercontent.com/randomguy454/"             --
+--      .. "simplyspirited/main/loader.lua"))()                       --
+--                                                                    --
+--  BOOT SEQUENCE:                                                   --
+--    1. Render the loading interface (CoreGui with fallback)        --
+--    2. Animate the intro                                           --
+--    3. Fetch the runtime payload with retry and backoff            --
+--    4. Validate the payload without executing it                   --
+--    5. Execute the runtime with a context table                    --
+--    6. Hand off via the reveal transition                           --
+--                                                                    --
+--  RUNTIME CONTRACT (context passed to main.lua):                   --
+--    ctx.version      string                                        --
+--    ctx.theme        color palette table                           --
+--    ctx.capabilities probed executor features                      --
+--    ctx.gui          ScreenGui container for runtime UI            --
+--    ctx.reveal()     runtime calls this when its window is built   --
+--    ctx.destroy()    emergency loader teardown                     --
+--    ctx.log(level, message)  shared logger                         --
+--                                                                    --
+--  FAILURE MODES (all surface in the error card):                   --
+--    - Network failure after retries                                 --
+--    - Repository 404 (bad ref or path)                              --
+--    - Payload syntax error (compile check before run)               --
+--    - Runtime error during execution                                 --
+--    Every failure offers Retry (re-runs boot without re-executing   --
+--    the one-liner) and Copy error (if clipboard is available).     --
+--                                                                    --
+--  FAILSAFE:                                                        --
+--    If the runtime succeeds but never calls ctx.reveal() within    --
+--    AUTO_REVEAL seconds, the loader forces the transition anyway   --
+--    so the user is never stuck on a loading screen.                 --
+--                                                                    --
+--  DESIGN RULES:                                                    --
+--    - Pure ASCII throughout                                         --
+--    - Flat syntax: no metatables, no nested closure tricks         --
+--    - Every stage logs its status                                  --
+--    - The indeterminate progress animation runs on the render     --
+--      thread and survives blocking HTTP calls                      --
+--                                                                    --
+--  TARGET    : UNC-compatible Roblox script executors                --
+--  LICENSE   : MIT                                                   --
+--                                                                    --
+--=====================================================================
 --=====================================================================
 
 -----------------------------------------------------------------------
@@ -24,7 +66,7 @@
 -----------------------------------------------------------------------
 
 local TweenService = game:GetService("TweenService")
-local Players      = game:GetService("Players")
+local Players = game:GetService("Players")
 
 local LocalPlayer = Players.LocalPlayer
 if not LocalPlayer then
@@ -32,7 +74,8 @@ if not LocalPlayer then
     return
 end
 
--- Cross-executor safe yield primitive.
+-- Cross-executor safe yield. Uses the task library when present
+-- and falls back to the legacy global.
 local function yield(t)
     if task and task.wait then
         task.wait(t)
@@ -41,35 +84,46 @@ local function yield(t)
     end
 end
 
+-- Safe spawn for fire-and-forget work.
+local function async(fn)
+    if task and task.spawn then
+        task.spawn(fn)
+    else
+        spawn(fn)
+    end
+end
+
+-- Safe delayed call.
+local function later(t, fn)
+    if task and task.delay then
+        return task.delay(t, fn)
+    else
+        return delay(t, fn)
+    end
+end
+
 -----------------------------------------------------------------------
 -- SECTION 2 : CONFIGURATION
 -----------------------------------------------------------------------
 
 local CONFIG = {
-    -- Source of truth for the payload.
-    REPO     = "randomguy454/simplyspirited",
-    BRANCH   = "main",
-    ENTRY    = "main.lua",
-    VERSION  = "0.1.0",
+    REPO       = "randomguy454/simplyspirited",
+    BRANCH     = "main",
+    ENTRY      = "main.lua",
+    VERSION    = "0.4.0",
 
-    -- Networking.
     MAX_RETRIES = 3,
-    RETRY_BASE  = 0.5,   -- seconds; doubles on each retry
+    RETRY_BASE  = 0.5,   -- seconds; doubles each retry
 
-    -- Contract name used to pass the context to the runtime.
     CONTEXT_KEY = "SimplySpy_Context",
+    AUTO_REVEAL = 10,    -- seconds before forced transition
 
-    -- Failsafe: force the transition if the runtime never calls
-    -- reveal() within this many seconds after successful boot.
-    AUTO_REVEAL = 10,
-
-    -- Verbose logging.
     DEBUG = false,
 }
 
--- Optional overrides from the user environment.
-local genv = (typeof(getgenv) == "function") and getgenv() or _G
-if typeof(genv.SIMPLYSPY_CONFIG) == "table" then
+-- User overrides from the shared environment.
+local genv = (type(getgenv) == "function") and getgenv() or _G
+if type(genv.SIMPLYSPY_CONFIG) == "table" then
     for key, value in pairs(genv.SIMPLYSPY_CONFIG) do
         CONFIG[key] = value
     end
@@ -94,21 +148,25 @@ end
 -----------------------------------------------------------------------
 -- SECTION 4 : CAPABILITY DETECTION
 -----------------------------------------------------------------------
+-- Probed once. Results are passed to the runtime through the
+-- context so modules can branch without re-probing.
 
 local CAPABILITIES = {}
 
 local function detectCapabilities()
-    CAPABILITIES.gethui = typeof(gethui) == "function"
-    CAPABILITIES.clipboard = typeof(setclipboard) == "function"
-    CAPABILITIES.filesystem = (typeof(writefile) == "function")
-        and (typeof(readfile) == "function")
-    CAPABILITIES.newcclosure = typeof(newcclosure) == "function"
-    CAPABILITIES.getrawmetatable = typeof(getrawmetatable) == "function"
-    CAPABILITIES.getgenv = typeof(getgenv) == "function"
+    CAPABILITIES.gethui = (type(gethui) == "function")
+    CAPABILITIES.clipboard = (type(setclipboard) == "function")
+    CAPABILITIES.filesystem = (type(writefile) == "function")
+        and (type(readfile) == "function")
+    CAPABILITIES.newcclosure = (type(newcclosure) == "function")
+    CAPABILITIES.getrawmetatable = (type(getrawmetatable) == "function")
+    CAPABILITIES.getgenv = (type(getgenv) == "function")
 
-    for name, supported in pairs(CAPABILITIES) do
-        debugLog(string.format("capability %-16s %s",
-            name, supported and "yes" or "no"))
+    if CONFIG.DEBUG then
+        for name, supported in pairs(CAPABILITIES) do
+            debugLog(string.format("capability %-16s %s",
+                name, supported and "yes" or "no"))
+        end
     end
 end
 
@@ -119,24 +177,22 @@ end
 local function buildUrl()
     return string.format(
         "https://raw.githubusercontent.com/%s/%s/%s",
-        CONFIG.REPO, CONFIG.BRANCH, CONFIG.ENTRY
-    )
+        CONFIG.REPO, CONFIG.BRANCH, CONFIG.ENTRY)
 end
 
--- Fetches raw source. Returns (source, nil) or (nil, error).
+-- Returns (source, nil) on success or (nil, error) on failure.
 local function fetchSource(url)
-    local delay = CONFIG.RETRY_BASE
+    local waitTime = CONFIG.RETRY_BASE
 
     for attempt = 1, CONFIG.MAX_RETRIES do
         local ok, body = pcall(function()
-            -- Second argument bypasses the executor HTTP cache.
             return game:HttpGet(url, true)
         end)
 
         if ok and type(body) == "string" and #body > 0 then
-            -- GitHub serves this prefix when the ref or path is bad.
             if body:sub(1, 4) == "404:" then
-                return nil, "repository returned 404 (check REPO/BRANCH/ENTRY)"
+                return nil,
+                    "repository returned 404 (check REPO/BRANCH/ENTRY)"
             end
             return body
         end
@@ -145,12 +201,13 @@ local function fetchSource(url)
             attempt, CONFIG.MAX_RETRIES, tostring(body)))
 
         if attempt < CONFIG.MAX_RETRIES then
-            yield(delay)
-            delay = delay * 2
+            yield(waitTime)
+            waitTime = waitTime * 2
         end
     end
 
-    return nil, "network failed after " .. CONFIG.MAX_RETRIES .. " attempts"
+    return nil,
+        "network failed after " .. CONFIG.MAX_RETRIES .. " attempts"
 end
 
 -- Compiles without executing. Returns (chunk, nil) or (nil, error).
@@ -159,7 +216,8 @@ local function validateSource(source)
         return nil, "payload is empty"
     end
 
-    local chunk, err = (loadstring or load)(source, "=SimplySpy/Runtime")
+    local chunk, err = (loadstring or load)(source,
+        "=SimplySpy/Runtime")
     if not chunk then
         return nil, "syntax error in payload: " .. tostring(err)
     end
@@ -205,16 +263,21 @@ end
 -----------------------------------------------------------------------
 -- Layout:
 --   ScreenGui
---     Dim        (full screen, fades in, subtle dark veil)
---     Card       (centered, draggable)
---       Logo     (accent rounded square, "SS")
---       Title    ("SimplySpy")
---       Subtitle ("remote inspection suite")
---       Status   (stage text)
---       Percent  (right aligned)
---       Track
---         Fill   (accent gradient)
---       Footer   (version and repository)
+--     Dim        full screen veil
+--     Card       centered, draggable
+--       Logo     accent rounded square, "SS"
+--       Title    "SimplySpy"
+--       Subtitle "remote inspection suite"
+--       Status   stage text
+--       Percent  right-aligned percentage
+--       Track    progress bar container
+--         Fill   gradient fill
+--       Footer   version and repository
+--
+-- Error elements (hidden until a failure):
+--   ErrorMessage   wrapped text
+--   RetryButton    re-runs boot
+--   CopyButton     copies error text
 
 local gui
 local card
@@ -222,12 +285,10 @@ local dim
 local statusLabel
 local percentLabel
 local fill
-local track
-local errorButtonRetry
-local errorButtonCopy
 local errorMessage
+local retryButton
+local copyButton
 
--- Collected for group fade operations.
 local fadeables = {}
 
 local function registerFadeable(label)
@@ -240,12 +301,29 @@ local function setFade(transparency)
     end
 end
 
+local function new(className, props)
+    local inst = Instance.new(className)
+    local parent = nil
+    for k, v in pairs(props or {}) do
+        if k == "Parent" then
+            parent = v
+        else
+            inst[k] = v
+        end
+    end
+    if parent then
+        inst.Parent = parent
+    end
+    return inst
+end
+
 local function buildInterface()
-    gui = Instance.new("ScreenGui")
-    gui.Name = "SimplySpy_Loader"
-    gui.ResetOnSpawn = false
-    gui.DisplayOrder = 999
-    gui.IgnoreGuiInset = true
+    gui = new("ScreenGui", {
+        Name = "SimplySpy_Loader",
+        ResetOnSpawn = false,
+        DisplayOrder = 999,
+        IgnoreGuiInset = true,
+    })
 
     -- CoreGui first, PlayerGui fallback.
     local ok = pcall(function()
@@ -258,217 +336,254 @@ local function buildInterface()
         debugLog("parented to CoreGui")
     end
 
-    -- Full screen veil.
-    dim = Instance.new("Frame")
-    dim.Size = UDim2.fromScale(1, 1)
-    dim.BackgroundColor3 = THEME.Background
-    dim.BackgroundTransparency = 1
-    dim.BorderSizePixel = 0
-    dim.ZIndex = 1
-    dim.Parent = gui
+    dim = new("Frame", {
+        Name = "Dim",
+        Size = UDim2.fromScale(1, 1),
+        BackgroundColor3 = THEME.Background,
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ZIndex = 1,
+        Parent = gui,
+    })
 
-    -- Card container.
-    card = Instance.new("Frame")
-    card.Size = UDim2.fromOffset(380, 240)
-    card.Position = UDim2.new(0.5, 0, 0.5, 0)
-    card.AnchorPoint = Vector2.new(0.5, 0.5)
-    card.BackgroundColor3 = THEME.Card
-    card.BorderSizePixel = 0
-    card.Active = true
-    card.Draggable = true
-    card.ZIndex = 2
-    card.Parent = gui
+    card = new("Frame", {
+        Name = "Card",
+        Size = UDim2.fromOffset(380, 240),
+        Position = UDim2.new(0.5, 0, 0.5, 0),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundColor3 = THEME.Card,
+        BorderSizePixel = 0,
+        Active = true,
+        Draggable = true,
+        ZIndex = 2,
+        Parent = gui,
+    })
 
-    local cardCorner = Instance.new("UICorner")
-    cardCorner.CornerRadius = UDim.new(0, 10)
-    cardCorner.Parent = card
+    new("UICorner", {
+        CornerRadius = UDim.new(0, 10),
+        Parent = card,
+    })
 
-    local cardStroke = Instance.new("UIStroke")
-    cardStroke.Color = THEME.CardBorder
-    cardStroke.Thickness = 1
-    cardStroke.Parent = card
+    new("UIStroke", {
+        Color = THEME.CardBorder,
+        Thickness = 1,
+        Parent = card,
+    })
 
-    -- Scale handle for the intro and outro transforms.
-    local scale = Instance.new("UIScale")
-    scale.Name = "Scale"
-    scale.Scale = 0.92
-    scale.Parent = card
+    local scale = new("UIScale", {
+        Name = "Scale",
+        Scale = 0.92,
+        Parent = card,
+    })
 
     -- Logo mark.
-    local logo = Instance.new("Frame")
-    logo.Size = UDim2.fromOffset(44, 44)
-    logo.Position = UDim2.new(0, 24, 0, 24)
-    logo.BackgroundColor3 = THEME.Accent
-    logo.BorderSizePixel = 0
-    logo.ZIndex = 3
-    logo.Parent = card
+    local logo = new("Frame", {
+        Name = "Logo",
+        Size = UDim2.fromOffset(44, 44),
+        Position = UDim2.new(0, 24, 0, 24),
+        BackgroundColor3 = THEME.Accent,
+        BorderSizePixel = 0,
+        ZIndex = 3,
+        Parent = card,
+    })
 
-    local logoCorner = Instance.new("UICorner")
-    logoCorner.CornerRadius = UDim.new(0, 10)
-    logoCorner.Parent = logo
+    new("UICorner", {
+        CornerRadius = UDim.new(0, 10),
+        Parent = logo,
+    })
 
-    local logoText = Instance.new("TextLabel")
-    logoText.Size = UDim2.fromScale(1, 1)
-    logoText.BackgroundTransparency = 1
-    logoText.Text = "SS"
-    logoText.TextColor3 = THEME.Background
-    logoText.TextSize = 18
-    logoText.Font = Enum.Font.GothamBold
-    logoText.ZIndex = 4
-    logoText.Parent = logo
+    local logoText = new("TextLabel", {
+        Name = "LogoText",
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Text = "SS",
+        TextColor3 = THEME.Background,
+        TextSize = 18,
+        Font = Enum.Font.GothamBold,
+        ZIndex = 4,
+        Parent = logo,
+    })
     registerFadeable(logoText)
 
     -- Title.
-    local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, -160, 0, 26)
-    title.Position = UDim2.new(0, 82, 0, 24)
-    title.BackgroundTransparency = 1
-    title.Text = "SimplySpy"
-    title.TextColor3 = THEME.TextPrimary
-    title.TextSize = 20
-    title.Font = Enum.Font.GothamBold
-    title.TextXAlignment = Enum.TextXAlignment.Left
-    title.ZIndex = 3
-    title.Parent = card
+    local title = new("TextLabel", {
+        Name = "Title",
+        Size = UDim2.new(1, -160, 0, 26),
+        Position = UDim2.new(0, 82, 0, 24),
+        BackgroundTransparency = 1,
+        Text = "SimplySpy",
+        TextColor3 = THEME.TextPrimary,
+        TextSize = 20,
+        Font = Enum.Font.GothamBold,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 3,
+        Parent = card,
+    })
     registerFadeable(title)
 
     -- Subtitle.
-    local subtitle = Instance.new("TextLabel")
-    subtitle.Size = UDim2.new(1, -160, 0, 16)
-    subtitle.Position = UDim2.new(0, 82, 0, 50)
-    subtitle.BackgroundTransparency = 1
-    subtitle.Text = "remote inspection suite"
-    subtitle.TextColor3 = THEME.TextSecondary
-    subtitle.TextSize = 12
-    subtitle.Font = Enum.Font.Gotham
-    subtitle.TextXAlignment = Enum.TextXAlignment.Left
-    subtitle.ZIndex = 3
-    subtitle.Parent = card
+    local subtitle = new("TextLabel", {
+        Name = "Subtitle",
+        Size = UDim2.new(1, -160, 0, 16),
+        Position = UDim2.new(0, 82, 0, 50),
+        BackgroundTransparency = 1,
+        Text = "remote inspection suite",
+        TextColor3 = THEME.TextSecondary,
+        TextSize = 12,
+        Font = Enum.Font.Gotham,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 3,
+        Parent = card,
+    })
     registerFadeable(subtitle)
 
-    -- Status (left) and percent (right) sit above the progress bar.
-    statusLabel = Instance.new("TextLabel")
-    statusLabel.Size = UDim2.new(1, -110, 0, 14)
-    statusLabel.Position = UDim2.new(0, 24, 1, -78)
-    statusLabel.BackgroundTransparency = 1
-    statusLabel.Text = "initializing"
-    statusLabel.TextColor3 = THEME.TextSecondary
-    statusLabel.TextSize = 12
-    statusLabel.Font = Enum.Font.GothamMedium
-    statusLabel.TextXAlignment = Enum.TextXAlignment.Left
-    statusLabel.ZIndex = 3
-    statusLabel.Parent = card
+    -- Status text.
+    statusLabel = new("TextLabel", {
+        Name = "Status",
+        Size = UDim2.new(1, -110, 0, 14),
+        Position = UDim2.new(0, 24, 1, -78),
+        BackgroundTransparency = 1,
+        Text = "initializing",
+        TextColor3 = THEME.TextSecondary,
+        TextSize = 12,
+        Font = Enum.Font.GothamMedium,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 3,
+        Parent = card,
+    })
     registerFadeable(statusLabel)
 
-    percentLabel = Instance.new("TextLabel")
-    percentLabel.Size = UDim2.new(0, 80, 0, 14)
-    percentLabel.Position = UDim2.new(1, -104, 1, -78)
-    percentLabel.BackgroundTransparency = 1
-    percentLabel.Text = "0%"
-    percentLabel.TextColor3 = THEME.TextFaint
-    percentLabel.TextSize = 12
-    percentLabel.Font = Enum.Font.GothamMedium
-    percentLabel.TextXAlignment = Enum.TextXAlignment.Right
-    percentLabel.ZIndex = 3
-    percentLabel.Parent = card
+    -- Percentage text.
+    percentLabel = new("TextLabel", {
+        Name = "Percent",
+        Size = UDim2.new(0, 80, 0, 14),
+        Position = UDim2.new(1, -104, 1, -78),
+        BackgroundTransparency = 1,
+        Text = "0%",
+        TextColor3 = THEME.TextFaint,
+        TextSize = 12,
+        Font = Enum.Font.GothamMedium,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        ZIndex = 3,
+        Parent = card,
+    })
     registerFadeable(percentLabel)
 
     -- Progress track.
-    track = Instance.new("Frame")
-    track.Size = UDim2.new(1, -48, 0, 6)
-    track.Position = UDim2.new(0, 24, 1, -56)
-    track.BackgroundColor3 = THEME.BarTrack
-    track.BorderSizePixel = 0
-    track.ClipsDescendants = true
-    track.ZIndex = 3
-    track.Parent = card
-
-    local trackCorner = Instance.new("UICorner")
-    trackCorner.CornerRadius = UDim.new(1, 0)
-    trackCorner.Parent = track
-
-    fill = Instance.new("Frame")
-    fill.Size = UDim2.fromScale(0, 1)
-    fill.Position = UDim2.fromScale(0, 0)
-    fill.BackgroundColor3 = THEME.Accent
-    fill.BorderSizePixel = 0
-    fill.ZIndex = 4
-    fill.Parent = track
-
-    local fillCorner = Instance.new("UICorner")
-    fillCorner.CornerRadius = UDim.new(1, 0)
-    fillCorner.Parent = fill
-
-    local fillGradient = Instance.new("UIGradient")
-    fillGradient.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, THEME.Accent),
-        ColorSequenceKeypoint.new(1, THEME.AccentSoft),
+    local track = new("Frame", {
+        Name = "Track",
+        Size = UDim2.new(1, -48, 0, 6),
+        Position = UDim2.new(0, 24, 1, -56),
+        BackgroundColor3 = THEME.BarTrack,
+        BorderSizePixel = 0,
+        ClipsDescendants = true,
+        ZIndex = 3,
+        Parent = card,
     })
-    fillGradient.Parent = fill
+
+    new("UICorner", {
+        CornerRadius = UDim.new(1, 0),
+        Parent = track,
+    })
+
+    fill = new("Frame", {
+        Name = "Fill",
+        Size = UDim2.fromScale(0, 1),
+        Position = UDim2.fromScale(0, 0),
+        BackgroundColor3 = THEME.Accent,
+        BorderSizePixel = 0,
+        ZIndex = 4,
+        Parent = track,
+    })
+
+    new("UICorner", {
+        CornerRadius = UDim.new(1, 0),
+        Parent = fill,
+    })
+
+    new("UIGradient", {
+        Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, THEME.Accent),
+            ColorSequenceKeypoint.new(1, THEME.AccentSoft),
+        }),
+        Parent = fill,
+    })
 
     -- Footer.
-    local footer = Instance.new("TextLabel")
-    footer.Size = UDim2.new(1, -48, 0, 12)
-    footer.Position = UDim2.new(0, 24, 1, -30)
-    footer.BackgroundTransparency = 1
-    footer.Text = "v" .. CONFIG.VERSION .. "  -  " .. CONFIG.REPO
-    footer.TextColor3 = THEME.TextFaint
-    footer.TextSize = 10
-    footer.Font = Enum.Font.Gotham
-    footer.TextXAlignment = Enum.TextXAlignment.Left
-    footer.ZIndex = 3
-    footer.Parent = card
+    local footer = new("TextLabel", {
+        Name = "Footer",
+        Size = UDim2.new(1, -48, 0, 12),
+        Position = UDim2.new(0, 24, 1, -30),
+        BackgroundTransparency = 1,
+        Text = "v" .. CONFIG.VERSION .. "  -  " .. CONFIG.REPO,
+        TextColor3 = THEME.TextFaint,
+        TextSize = 10,
+        Font = Enum.Font.Gotham,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 3,
+        Parent = card,
+    })
     registerFadeable(footer)
 
-    -- Error elements (hidden until an error occurs).
-    errorMessage = Instance.new("TextLabel")
-    errorMessage.Size = UDim2.new(1, -48, 0, 30)
-    errorMessage.Position = UDim2.new(0, 24, 0, 86)
-    errorMessage.BackgroundTransparency = 1
-    errorMessage.Text = ""
-    errorMessage.TextColor3 = THEME.Error
-    errorMessage.TextSize = 11
-    errorMessage.Font = Enum.Font.Gotham
-    errorMessage.TextWrapped = true
-    errorMessage.TextXAlignment = Enum.TextXAlignment.Left
-    errorMessage.TextYAlignment = Enum.TextYAlignment.Top
-    errorMessage.TextTransparency = 1
-    errorMessage.ZIndex = 3
-    errorMessage.Parent = card
+    -- Error message (hidden until failure).
+    errorMessage = new("TextLabel", {
+        Name = "ErrorMessage",
+        Size = UDim2.new(1, -48, 0, 30),
+        Position = UDim2.new(0, 24, 0, 86),
+        BackgroundTransparency = 1,
+        Text = "",
+        TextColor3 = THEME.Error,
+        TextSize = 11,
+        Font = Enum.Font.Gotham,
+        TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        TextTransparency = 1,
+        ZIndex = 3,
+        Parent = card,
+    })
 
-    errorButtonRetry = Instance.new("TextButton")
-    errorButtonRetry.Size = UDim2.fromOffset(90, 26)
-    errorButtonRetry.Position = UDim2.new(1, -120, 1, -40)
-    errorButtonRetry.BackgroundColor3 = THEME.Accent
-    errorButtonRetry.BorderSizePixel = 0
-    errorButtonRetry.Text = "Retry"
-    errorButtonRetry.TextColor3 = THEME.TextPrimary
-    errorButtonRetry.TextSize = 12
-    errorButtonRetry.Font = Enum.Font.GothamMedium
-    errorButtonRetry.Visible = false
-    errorButtonRetry.ZIndex = 3
-    errorButtonRetry.Parent = card
+    -- Retry button (hidden until failure).
+    retryButton = new("TextButton", {
+        Name = "RetryButton",
+        Size = UDim2.fromOffset(90, 26),
+        Position = UDim2.new(1, -120, 1, -40),
+        BackgroundColor3 = THEME.Accent,
+        BorderSizePixel = 0,
+        Text = "Retry",
+        TextColor3 = THEME.TextPrimary,
+        TextSize = 12,
+        Font = Enum.Font.GothamMedium,
+        Visible = false,
+        ZIndex = 3,
+        Parent = card,
+    })
 
-    local retryCorner = Instance.new("UICorner")
-    retryCorner.CornerRadius = UDim.new(0, 6)
-    retryCorner.Parent = errorButtonRetry
+    new("UICorner", {
+        CornerRadius = UDim.new(0, 6),
+        Parent = retryButton,
+    })
 
-    errorButtonCopy = Instance.new("TextButton")
-    errorButtonCopy.Size = UDim2.fromOffset(90, 26)
-    errorButtonCopy.Position = UDim2.new(1, -222, 1, -40)
-    errorButtonCopy.BackgroundColor3 = THEME.BarTrack
-    errorButtonCopy.BorderSizePixel = 0
-    errorButtonCopy.Text = "Copy error"
-    errorButtonCopy.TextColor3 = THEME.TextSecondary
-    errorButtonCopy.TextSize = 12
-    errorButtonCopy.Font = Enum.Font.GothamMedium
-    errorButtonCopy.Visible = false
-    errorButtonCopy.ZIndex = 3
-    errorButtonCopy.Parent = card
+    -- Copy error button (hidden until failure).
+    copyButton = new("TextButton", {
+        Name = "CopyButton",
+        Size = UDim2.fromOffset(90, 26),
+        Position = UDim2.new(1, -222, 1, -40),
+        BackgroundColor3 = THEME.BarTrack,
+        BorderSizePixel = 0,
+        Text = "Copy error",
+        TextColor3 = THEME.TextSecondary,
+        TextSize = 12,
+        Font = Enum.Font.GothamMedium,
+        Visible = false,
+        ZIndex = 3,
+        Parent = card,
+    })
 
-    local copyCorner = Instance.new("UICorner")
-    copyCorner.CornerRadius = UDim.new(0, 6)
-    copyCorner.Parent = errorButtonCopy
+    new("UICorner", {
+        CornerRadius = UDim.new(0, 6),
+        Parent = copyButton,
+    })
 
     return scale
 end
@@ -485,12 +600,13 @@ end
 local function setProgress(alpha)
     alpha = math.clamp(alpha, 0, 1)
     fill.Size = UDim2.fromScale(alpha, 1)
-    percentLabel.Text = string.format("%d%%", math.floor(alpha * 100 + 0.5))
+    percentLabel.Text = string.format("%d%%",
+        math.floor(alpha * 100 + 0.5))
 end
 
--- Indeterminate mode: the fill slides across the track on a loop
--- while a blocking operation (the HTTP fetch) is in flight. The
--- tween runs on the render thread and survives script yields.
+-- Indeterminate mode: the fill slides across the track in a loop
+-- while a blocking operation runs. The tween lives on the render
+-- thread, so the animation continues during HttpGet.
 local indeterminateTween = nil
 
 local function startIndeterminate()
@@ -500,12 +616,12 @@ local function startIndeterminate()
         0.9,
         Enum.EasingStyle.Linear,
         Enum.EasingDirection.Out,
-        -1,   -- repeat forever
+        -1,
         false,
         0
     )
     indeterminateTween = TweenService:Create(fill, info, {
-        Position = UDim2.fromScale(1, 0)
+        Position = UDim2.fromScale(1, 0),
     })
     indeterminateTween:Play()
 end
@@ -522,8 +638,8 @@ local function showError(message)
     stopIndeterminate()
     setStatus("failed", THEME.Error)
     setProgress(1)
-    fill.BackgroundColor3 = THEME.Error
 
+    fill.BackgroundColor3 = THEME.Error
     local gradient = fill:FindFirstChildOfClass("UIGradient")
     if gradient then
         gradient.Color = ColorSequence.new(THEME.Error)
@@ -531,16 +647,16 @@ local function showError(message)
 
     errorMessage.Text = tostring(message)
     tween(errorMessage, 0.2, { TextTransparency = 0 })
-    errorButtonRetry.Visible = true
-    errorButtonCopy.Visible = CAPABILITIES.clipboard
+    retryButton.Visible = true
+    copyButton.Visible = CAPABILITIES.clipboard
 
     log("ERROR", tostring(message))
 end
 
 local function resetAfterError()
     errorMessage.TextTransparency = 1
-    errorButtonRetry.Visible = false
-    errorButtonCopy.Visible = false
+    retryButton.Visible = false
+    copyButton.Visible = false
 
     local gradient = fill:FindFirstChildOfClass("UIGradient")
     if gradient then
@@ -556,22 +672,15 @@ end
 -----------------------------------------------------------------------
 -- SECTION 10 : TRANSITION AND HANDOFF
 -----------------------------------------------------------------------
--- Contract with the runtime (main.lua):
---   ctx.gui       : ScreenGui to parent runtime UI into
---   ctx.reveal()  : runtime calls this once its window is built;
---                   the loader performs the outro transform
---   ctx.destroy() : emergency teardown of loader visuals
---   ctx.theme, ctx.capabilities, ctx.log : shared utilities
 
 local revealCalled = false
-local autoRevealConnection = nil
+local failsafeHandle = nil
 
 local function destroyLoader()
     if gui then
         gui:Destroy()
         gui = nil
     end
-    local genv = CAPABILITIES.getgenv and getgenv() or _G
     genv[CONFIG.CONTEXT_KEY] = nil
 end
 
@@ -581,13 +690,19 @@ local function reveal()
     end
     revealCalled = true
 
-    if autoRevealConnection then
-        autoRevealConnection:Disconnect()
-        autoRevealConnection = nil
+    if failsafeHandle then
+        -- task.delay returns a thread, not a connection; cancel
+        -- what can be cancelled and clear the reference either way.
+        pcall(function()
+            if type(failsafeHandle) == "userdata" then
+                failsafeHandle:Disconnect()
+            end
+        end)
+        failsafeHandle = nil
     end
 
     -- Outro: veil fades, card lifts and dissolves. The runtime
-    -- window should begin its own fade-in at the same moment.
+    -- window fades in simultaneously for one seamless transform.
     tween(dim, 0.45, { BackgroundTransparency = 1 })
 
     local scale = card:FindFirstChild("Scale")
@@ -603,7 +718,7 @@ local function reveal()
         tween(stroke, 0.45, { Transparency = 1 })
     end
 
-    task.delay(0.5, destroyLoader)
+    later(0.5, destroyLoader)
     debugLog("reveal complete, loader visuals released")
 end
 
@@ -637,7 +752,8 @@ local function runBoot()
     end
 
     local sizeKb = #source / 1024
-    setStatus(string.format("downloaded %.1f KB", sizeKb), THEME.Success)
+    setStatus(string.format("downloaded %.1f KB", sizeKb),
+        THEME.Success)
     setProgress(0.6)
     yield(0.15)
 
@@ -654,44 +770,44 @@ local function runBoot()
     setProgress(0.85)
     yield(0.1)
 
-    -- Stage 5: handoff.
+    -- Stage 5: handoff. Build the context and execute the runtime.
     setStatus("starting runtime")
     setProgress(0.95)
 
-    local genv = CAPABILITIES.getgenv and getgenv() or _G
     local context = {
-        version      = CONFIG.VERSION,
-        theme        = THEME,
+        version = CONFIG.VERSION,
+        theme = THEME,
         capabilities = CAPABILITIES,
-        gui          = gui,
-        reveal       = reveal,
-        destroy      = destroyLoader,
-        log          = log,
+        gui = gui,
+        reveal = reveal,
+        destroy = destroyLoader,
+        log = log,
     }
     genv[CONFIG.CONTEXT_KEY] = context
 
     local ok, runtimeError = pcall(chunk)
+
     if not ok then
         genv[CONFIG.CONTEXT_KEY] = nil
         showError("runtime error: " .. tostring(runtimeError))
         return
     end
 
-    -- Stage 6: ready. Runtime will call reveal() when its window
+    -- Stage 6: ready. The runtime calls reveal() when its window
     -- is built. The failsafe forces the transition if it stalls.
     setStatus("ready", THEME.Success)
     setProgress(1)
 
-    autoRevealConnection = task.delay(CONFIG.AUTO_REVEAL, function()
+    failsafeHandle = later(CONFIG.AUTO_REVEAL, function()
         if not revealCalled then
-            log("WARN", "runtime did not call reveal, forcing transition")
+            log("WARN", "runtime did not call reveal, forcing it")
             reveal()
         end
     end)
 end
 
 -----------------------------------------------------------------------
--- SECTION 12 : INTRO SEQUENCE AND ENTRY
+-- SECTION 12 : INTRO SEQUENCE
 -----------------------------------------------------------------------
 
 local function playIntro()
@@ -719,13 +835,13 @@ local function playIntro()
         tween(scale, 0.45, { Scale = 1 }, Enum.EasingStyle.Back)
     end
 
-    -- Start the boot sequence slightly after the intro begins so
+    -- Start the boot sequence shortly after the intro begins so
     -- both are visible together.
-    task.delay(0.25, runBoot)
+    later(0.25, runBoot)
 end
 
 -----------------------------------------------------------------------
--- ENTRY POINT
+-- SECTION 13 : ENTRY POINT
 -----------------------------------------------------------------------
 
 local scale = buildInterface()
@@ -734,19 +850,20 @@ playIntro()
 log("INFO", string.format("loader v%s active (%s/%s)",
     CONFIG.VERSION, CONFIG.REPO, CONFIG.BRANCH))
 
--- Error UI wiring (retry and copy-error).
-errorButtonRetry.MouseButton1Click:Connect(function()
+-- Error UI wiring. Retry re-runs the boot sequence without
+-- requiring the one-liner to be executed again.
+retryButton.MouseButton1Click:Connect(function()
     resetAfterError()
-    task.spawn(runBoot)
+    async(runBoot)
 end)
 
-errorButtonCopy.MouseButton1Click:Connect(function()
-    if setclipboard then
+copyButton.MouseButton1Click:Connect(function()
+    if type(setclipboard) == "function" then
         setclipboard(errorMessage.Text)
-        errorButtonCopy.Text = "Copied"
-        task.delay(1.5, function()
-            if errorButtonCopy then
-                errorButtonCopy.Text = "Copy error"
+        copyButton.Text = "Copied"
+        later(1.5, function()
+            if copyButton then
+                copyButton.Text = "Copy error"
             end
         end)
     end
