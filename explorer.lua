@@ -1,20 +1,19 @@
 --[[
-    simplyspirited v4.6 — explorer (dex-class)
+    simplyspirited v4.6 — explorer
     SHADOWMILESC / computerizedcarrier2
 
     game anatomy browser. navigate the DataModel, inspect
     instances, read curated properties per class, search
     game-wide by name.
 
-    the suite integration (what plain dex can't do):
-    - select a RemoteEvent/Function → its capture profile
-      appears inline (calls, signatures, callers)
-    - select a ValueBase → one-click "watch" wires it into
-      the value monitor
-    - select a script → one-click decompile via the 6-layer
-      pipeline
+    suite integration:
+    - remote instances → live capture profiles inline
+    - value instances  → one-click watch
+    - script instances → one-click decompile
 
-    read-mostly by design. this is a microscope, not a crowbar.
+    v4.6 fix: all property reads nil-guarded (no more
+    "concatenate string with nil" on partial classes).
+    every property is tostring'd BEFORE display.
 ]]
 
 print("[SS2-explorer] v4.6 loading...")
@@ -52,7 +51,7 @@ local okP = pcall(function()
 end)
 if not okP then gui.Parent = P:WaitForChild("PlayerGui") end
 
--- ═══ window: 460x340 ═══
+-- ═══ window ═══
 local win = Instance.new("Frame")
 win.Size = UDim2.fromOffset(460, 340)
 win.Position = UDim2.fromOffset(480, 40)
@@ -89,7 +88,8 @@ hClose.Text = "x"
 hClose.Parent = header
 hClose.MouseButton1Click:Connect(function() gui:Destroy() end)
 
-local dragging, dStart, dPos = false, nil, nil
+local dragging = false
+local dStart, dPos
 header.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1
     or i.UserInputType == Enum.UserInputType.Touch then
@@ -110,7 +110,7 @@ UIS.InputEnded:Connect(function()
     dragging = false
 end)
 
--- ═══ nav bar: up button + breadcrumb ═══
+-- ═══ nav bar ═══
 local navBar = Instance.new("Frame")
 navBar.Size = UDim2.new(1, 0, 0, 20)
 navBar.Position = UDim2.new(0, 0, 0, 20)
@@ -220,7 +220,7 @@ local function dLine(txt, col, order, depth)
     l.TextColor3 = col or T.TEXT
     l.TextXAlignment = Enum.TextXAlignment.Left
     l.TextTruncate = Enum.TextTruncate.AtEnd
-    l.Text = txt
+    l.Text = tostring(txt)
     l.LayoutOrder = order
     l.Parent = detailPane
     return l
@@ -229,46 +229,86 @@ end
 local function dAction(txt, col, order, cb)
     local b = Instance.new("TextButton")
     b.Size = UDim2.new(1, -8, 0, 16)
-    b.Position = UDim2.fromOffset(5 + ((order % 2 == 0) and 10 or 0), 0)
+    b.Position = UDim2.fromOffset(5, 0)
     b.BackgroundTransparency = 1
     b.Font = Enum.Font.Code
     b.TextSize = 10
     b.TextColor3 = col or T.TEXT
     b.TextXAlignment = Enum.TextXAlignment.Left
-    b.Text = "> " .. txt
+    b.Text = "> " .. tostring(txt)
     b.LayoutOrder = order
     b.MouseButton1Click:Connect(cb)
     b.Parent = detailPane
     return b
 end
 
--- ═══ detail view: curated properties per class ═══
-local function showDetail(inst)
-    clearDetail()
-    local n = 0
-    local function prop(label, value, col)
-        n = n + 1
-        dLine(label .. "  " .. tostring(value), col or T.TEXT, n)
+-- ═══ SAFE PROPERTY COLLECTOR (the v4.6 fix) ═══
+-- every read pcall'd, every value tostring'd, nils dropped
+-- BEFORE display — no concatenation can ever see a nil
+local function collectProps(inst)
+    local props = {}
+    local readers = {
+        { label = "position",  read = function() return tostring(inst.Position) end,        cls = "BasePart" },
+        { label = "size",      read = function() return tostring(inst.Size) end,           cls = "BasePart" },
+        { label = "anchored",  read = function() return tostring(inst.Anchored) end,       cls = "BasePart" },
+        { label = "material",  read = function() return tostring(inst.Material) end,       cls = "BasePart" },
+        { label = "transparency", read = function() return tostring(inst.Transparency) end, cls = "BasePart" },
+        { label = "canCollide", read = function() return tostring(inst.CanCollide) end,   cls = "BasePart" },
+        { label = "health",    read = function() return tostring(inst.Health) end,        cls = "Humanoid" },
+        { label = "maxHealth", read = function() return tostring(inst.MaxHealth) end,     cls = "Humanoid" },
+        { label = "walkSpeed", read = function() return tostring(inst.WalkSpeed) end,     cls = "Humanoid" },
+        { label = "userId",    read = function() return tostring(inst.UserId) end,        cls = "Player" },
+        { label = "team",      read = function() return tostring(inst.Team) end,          cls = "Player" },
+        { label = "meshId",    read = function() return tostring(inst.MeshId) end,        cls = "MeshPart" },
+        { label = "textureId", read = function() return tostring(inst.TextureId) end,     cls = "MeshPart" },
+        { label = "autoAssignable", read = function() return tostring(inst.AutoAssignable) end, cls = "Team" },
+        { label = "teamColor", read = function() return tostring(inst.TeamColor) end,     cls = "Team" },
+        { label = "text",      read = function() return tostring(inst.Text) end,          cls = "TextLabel" },
+        { label = "image",     read = function() return tostring(inst.Image) end,         cls = "ImageLabel" },
+    }
+    for _, r in ipairs(readers) do
+        if inst:IsA(r.cls) then
+            local ok, val = pcall(r.read)
+            if ok and val ~= nil then
+                props[#props + 1] = { label = r.label, value = val }
+            end
+        end
     end
+    return props
+end
 
-    if not inst then
-        dLine("(nothing selected)", T.DIM, 1)
+-- ═══ DETAIL VIEW ═══
+local function showDetail(inst)
+    if not inst or not inst.Parent then
+        clearDetail()
+        dLine("(invalid instance)", T.DIM, 1)
         return
     end
+    clearDetail()
+    local n = 0
 
-    prop("name", inst.Name)
-    prop("class", inst.ClassName, T.RED)
-    pcall(function() prop("parent", inst.Parent and inst.Parent.Name or "nil") end)
+    dLine("name:  " .. tostring(inst.Name), T.TEXT, n + 1)
+    n = n + 1
+    dLine("class: " .. inst.ClassName, T.RED, n + 1)
+    n = n + 1
+    local okPar, parName = pcall(function() return inst.Parent.Name end)
+    if okPar and parName then
+        dLine("parent: " .. parName, T.DIM, n + 1)
+        n = n + 1
+    end
 
     -- suite integration: remote capture profile
     if inst:IsA("RemoteEvent") or inst:IsA("RemoteFunction") then
         local prof = SS2.remotes[inst]
         if prof then
             n = n + 1
-            dLine("── capture profile ──", T.DIM, n)
-            prop("calls", prof.calls .. " (out " .. prof.out .. " / in " .. prof.inn .. ")")
+            dLine("── capture profile ──", T.DIM, n + 1)
+            n = n + 1
+            dLine("calls: " .. prof.calls .. " (out " .. prof.out .. " / in " .. prof.inn .. ")", T.TEXT, n + 1)
+            n = n + 1
             if (prof.metaCaught or 0) > 0 then
-                prop("net-caught", prof.metaCaught)
+                dLine("net-caught: " .. prof.metaCaught, T.DIM, n + 1)
+                n = n + 1
             end
             local sigs = {}
             for sig, cnt in pairs(prof.sigs) do
@@ -276,115 +316,98 @@ local function showDetail(inst)
             end
             table.sort(sigs, function(a, b) return a.c > b.c end)
             for k = 1, math.min(5, #sigs) do
+                dLine("  sig[" .. sigs[k].c .. "x] " .. tostring(sigs[k].s):sub(1, 60), T.DIM, n + 1)
                 n = n + 1
-                dLine("  sig[" .. sigs[k].c .. "x] " .. sigs[k].s:sub(1, 60), T.DIM, n)
             end
-            n = n + 1
-            dAction("full profile (console)", T.TEXT, n, function()
+            dAction("full profile (console)", T.TEXT, n + 1, function()
                 if SS2.profileRemote then SS2.profileRemote(inst.Name) end
             end)
-        else
             n = n + 1
-            dLine("(not captured yet — will profile on first fire)", T.DIM, n)
+        else
+            dLine("(not captured yet — profiles on first fire)", T.DIM, n + 1)
+            n = n + 1
         end
     end
 
     -- value integration
     if inst:IsA("ValueBase") then
-        pcall(function() prop("value", inst.Value) end)
-        n = n + 1
+        local okV, val = pcall(function() return inst.Value end)
+        if okV then
+            dLine("value: " .. tostring(val), T.TEXT, n + 1)
+            n = n + 1
+        end
         if SS2.watchValue then
-            dAction("watch this value", T.RED, n, function()
+            dAction("watch this value", T.RED, n + 1, function()
                 SS2.watchValue(inst)
             end)
+            n = n + 1
         end
     end
 
     -- script integration
     if inst:IsA("LocalScript") or inst:IsA("ModuleScript") then
-        local ok, src = pcall(function() return inst.Source end)
-        if ok and type(src) == "string" and #src > 0 then
-            prop("source", #src .. " chars", T.TEXT)
+        local okS, src = pcall(function() return inst.Source end)
+        if okS and type(src) == "string" and #src > 0 then
+            dLine("source: " .. #src .. " chars", T.TEXT, n + 1)
             n = n + 1
-            if SS2.decomp and SS2.decomp.script then
-                dAction("decompile (6-layer)", T.RED, n, function()
-                    SS2.decomp.script(inst)
-                end)
-            end
         else
-            prop("source", "inaccessible", T.DIM)
+            dLine("source: inaccessible", T.DIM, n + 1)
             n = n + 1
-            if SS2.decomp and getscriptbytecode then
-                dAction("bytecode capture", T.RED, n, function()
-                    SS2.decomp.script(inst)
-                end)
-            end
+        end
+        if SS2.decomp and SS2.decomp.script then
+            dAction("decompile (6-layer)", T.RED, n + 1, function()
+                SS2.decomp.script(inst)
+            end)
+            n = n + 1
         end
     end
 
-    -- common class-specific properties
-    local okP, props = pcall(function()
-        if inst:IsA("BasePart") then
-            return { { "position", inst.Position }, { "size", inst.Size },
-                { "anchored", inst.Anchored }, { "material", inst.Material },
-                { "transparency", inst.Transparency }, { "canCollide", inst.CanCollide } }
-        elseif inst:IsA("Humanoid") then
-            return { { "health", inst.Health }, { "maxHealth", inst.MaxHealth },
-                { "walkSpeed", inst.WalkSpeed } }
-        elseif inst:IsA("Player") then
-            return { { "userId", inst.UserId }, { "team", inst.Team } }
-        elseif inst:IsA("MeshPart") then
-            return { { "meshId", inst.MeshId:sub(1, 40) }, { "textureId", inst.TextureId:sub(1, 40) } }
-        end
-        return nil
-    end)
-    if okP and props then
+    -- safe class-specific properties
+    local props = collectProps(inst)
+    if #props > 0 then
+        dLine("── properties ──", T.DIM, n + 1)
         n = n + 1
-        dLine("── properties ──", T.DIM, n)
         for _, p in ipairs(props) do
-            prop(p[1], p[2])
+            dLine("  " .. p.label .. " = " .. p.value, T.TEXT, n + 1)
+            n = n + 1
         end
     end
 
     -- descendant census
-    local okD, census = pcall(function()
-        local counts, total = {}, 0
+    local okC, census, total = pcall(function()
+        local counts, tot = {}, 0
         for _, d in ipairs(inst:GetDescendants()) do
-            total = total + 1
+            tot = tot + 1
             counts[d.ClassName] = (counts[d.ClassName] or 0) + 1
         end
-        return counts, total
+        return counts, tot
     end)
-    if okD then
+    if okC and total and total > 0 then
+        dLine("── descendants (" .. total .. ") ──", T.DIM, n + 1)
         n = n + 1
-        dLine("── descendants ──", T.DIM, n)
         local sorted = {}
         for cls, cnt in pairs(census) do
             sorted[#sorted + 1] = { cls = cls, n = cnt }
         end
         table.sort(sorted, function(a, b) return a.n > b.n end)
         for k = 1, math.min(8, #sorted) do
+            dLine("  " .. sorted[k].cls .. ": " .. sorted[k].n, T.DIM, n + 1)
             n = n + 1
-            dLine("  " .. sorted[k].cls .. ": " .. sorted[k].n, T.DIM, n)
         end
-        n = n + 1
-        dLine("  total: " .. total, T.DIM, n)
     end
 
     -- actions
-    n = n + 1
-    dAction("copy full path", T.TEXT, n, function()
+    dAction("copy full path", T.TEXT, n + 2, function()
         if setclipboard then setclipboard(inst:GetFullName()) end
     end)
     if inst:IsA("LocalScript") or inst:IsA("ModuleScript") then
-        n = n + 1
-        dAction("full decompile report", T.RED, n, function()
+        dAction("full decompile report", T.RED, n + 3, function()
             if SS2.decomp and SS2.decomp.script then SS2.decomp.script(inst) end
         end)
     end
 end
 
--- ═══ tree view: children of current container ═══
+-- ═══ TREE VIEW ═══
 local function renderTree()
     clearTree()
     local ok, children = pcall(function() return current:GetChildren() end)
@@ -401,7 +424,6 @@ local function renderTree()
         return
     end
 
-    -- sort: remotes/scripts first, then by name
     local sorted = {}
     for _, c in ipairs(children) do
         sorted[#sorted + 1] = c
@@ -426,27 +448,29 @@ local function renderTree()
             l.Parent = treePane
             break
         end
+        local inst = c
         local b = Instance.new("TextButton")
         b.Size = UDim2.new(1, -6, 0, 16)
         b.BackgroundColor3 = T.BG
         b.BorderSizePixel = 0
         b.Font = Enum.Font.Code
         b.TextSize = 10
-        b.TextColor3 = (c:IsA("RemoteEvent") or c:IsA("RemoteFunction")) and T.RED or T.TEXT
+        b.TextColor3 = (inst:IsA("RemoteEvent") or inst:IsA("RemoteFunction")) and T.RED or T.TEXT
         b.TextXAlignment = Enum.TextXAlignment.Left
         b.TextTruncate = Enum.TextTruncate.AtEnd
-        b.Text = classTag(c.ClassName) .. " " .. c.Name
+        b.Text = classTag(inst.ClassName) .. " " .. inst.Name
         b.LayoutOrder = i
         b.MouseButton1Click:Connect(function()
-            -- descend if container-ish, show detail always
-            local canDescend = pcall(function() return #c:GetChildren() >= 0 end)
-                and (c:IsA("Model") or c:IsA("Folder") or c:IsA("Player")
-                    or c:IsA("Workspace") or c == game
-                    or c:IsA("ReplicatedStorage") or c:IsA("Players"))
-            showDetail(c)
-            if canDescend then
+            showDetail(inst)
+            local okDesc, canDescend = pcall(function()
+                return (inst:IsA("Model") or inst:IsA("Folder") or inst:IsA("Player")
+                    or inst:IsA("Workspace") or inst == game
+                    or inst:IsA("ReplicatedStorage") or inst:IsA("Players"))
+                    and true or false
+            end)
+            if okDesc and canDescend then
                 table.insert(history, current)
-                current = c
+                current = inst
                 crumb.Text = current:GetFullName()
                 renderTree()
             end
@@ -465,7 +489,7 @@ upBtn.MouseButton1Click:Connect(function()
     end
 end)
 
--- ═══ SEARCH: game-wide, bounded ═══
+-- ═══ SEARCH ═══
 local searching = false
 searchBox:GetPropertyChangedSignal("Text"):Connect(function()
     local term = searchBox.Text:lower()
@@ -542,4 +566,4 @@ SS2.explorer = {
     end,
 }
 
-print("[SS2-explorer] v4.6 LIVE — suite-aware anatomy browser")
+print("[SS2-explorer] v4.6 LIVE — nil-safe, suite-aware")
